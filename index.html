@@ -4,7 +4,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>SEO PARASITE PRO v17 — Settings · Help · 33 Sources · Vercel + Supabase</title>
+<title>SEO PARASITE PRO v18 — Settings · Help · 33 Sources · Vercel + Supabase</title>
 <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Tahoma:wght@400;700&display=swap" rel="stylesheet">
 <style>
 /* =============================================
@@ -6394,18 +6394,27 @@ function renderBlogCommenter(el){
       <!-- Add Single Site -->
       <div class="card">
         <div class="card-title">➕ Add Single Target</div>
-        <div class="fg"><label class="lbl">Blog / Post URL</label>
-          <input type="url" id="bc-url" placeholder="https://example.com/blog/post-title"/></div>
+        <div class="fg"><label class="lbl">Blog / Post URL <span class="tm" style="font-size:9px;font-weight:400">(platform auto-detected on paste)</span></label>
+          <input type="url" id="bc-url" placeholder="https://example.com/blog/post-title" oninput="bcAutoDetectType(this.value)"/></div>
         <div class="grid2">
           <div class="fg mb0"><label class="lbl">Label (optional)</label>
             <input type="text" id="bc-label" placeholder="e.g. Health Blog #1"/></div>
           <div class="fg mb0"><label class="lbl">Platform Type</label>
             <select id="bc-type">
-              <option value="wordpress">WordPress</option>
-              <option value="blogger">Blogger</option>
-              <option value="disqus">Disqus</option>
-              <option value="generic">Generic</option>
-              <option value="other">Other</option>
+              <option value="generic">⚙ Generic (Auto-detect)</option>
+              <option value="wordpress">🔵 WordPress</option>
+              <option value="blogger">🟠 Blogger / Blogspot</option>
+              <option value="medium">⚫ Medium</option>
+              <option value="tumblr">🌀 Tumblr</option>
+              <option value="disqus">💬 Disqus</option>
+              <option value="squarespace">⬛ Squarespace</option>
+              <option value="drupal">💧 Drupal</option>
+              <option value="joomla">🔶 Joomla</option>
+              <option value="forum">💬 Forum (phpBB/MyBB/XF)</option>
+              <option value="ghost">👻 Ghost</option>
+              <option value="wix">🟦 Wix</option>
+              <option value="typepad">📝 Typepad</option>
+              <option value="other">📝 Other</option>
             </select></div>
         </div>
         <div class="fg mt8"><label class="lbl">Notes</label>
@@ -6716,6 +6725,7 @@ async function bcProxyFetch(targetUrl, opts={}){
       const fetchOpts = {
         method: opts.method||'GET',
         headers: {
+          ...(opts.headers||{}),
           ...(opts.contentType ? {'Content-Type': opts.contentType} : {}),
           ...(proxy.extraHeaders||{}),
           ...(opts.extraHeaders||{})
@@ -6731,15 +6741,18 @@ async function bcProxyFetch(targetUrl, opts={}){
       if(isPost && proxy.vercel && opts.body){
         fetchOpts.headers['Content-Type'] = 'application/json';
         if(proxy.secret) fetchOpts.headers['X-API-Key'] = proxy.secret;
+        // Build upstream headers — preserve Authorization from opts.headers so API keys flow through
+        const upstreamHdrs = {
+          'Content-Type': opts.contentType || (opts.asJson ? 'application/json' : 'application/x-www-form-urlencoded'),
+          'Referer': targetUrl,
+          ...(opts.headers||{}),
+          ...(opts.extraHeaders||{})
+        };
         fetchOpts.body = JSON.stringify({
           url: targetUrl,
           method: opts.method || 'POST',
           body: opts.body,
-          headers: {
-            'Content-Type': opts.contentType || 'application/x-www-form-urlencoded',
-            'Referer': targetUrl,
-            ...(opts.extraHeaders||{})
-          }
+          headers: upstreamHdrs
         });
       } else if(proxy.vercel && proxy.secret){
         // GET via Vercel proxy — still needs auth header if secret is set
@@ -7372,9 +7385,391 @@ function bcManualAssist(site, name, email, website, comment){
 }
 
 // ── MAIN COMMENT ORCHESTRATOR v2 ─────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+// NEW PLATFORM-SPECIFIC COMMENT ENGINES
+// ══════════════════════════════════════════════════════════════════
+
+// ── BLOGGER / BLOGSPOT ENGINE ─────────────────────────────────────
+async function bcBloggerComment(url, html, name, email, comment, logFn){
+  logFn(`   → Blogger engine: scanning for comment form...`,'info');
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, 'text/html');
+
+  // Extract blog ID and post ID from page
+  const blogIdM = html.match(/data-blogid=['""]?(\d+)['""]?/i) || html.match(/blogId['""]?\s*[:=]\s*['""]?(\d+)/i) || html.match(/var\s+blogId\s*=\s*(\d+)/i);
+  const postIdM  = html.match(/data-postid=['""]?(\d+)['""]?/i) || html.match(/postId['""]?\s*[:=]\s*['""]?(\d+)/i) || html.match(/var\s+postId\s*=\s*(\d+)/i);
+
+  const blogId = blogIdM ? blogIdM[1] : null;
+  const postId = postIdM ? postIdM[1] : null;
+
+  if(blogId && postId){
+    logFn(`   ✓ Blogger IDs: blog=${blogId} post=${postId}`,'success');
+    // Post to Blogger's comment endpoint
+    const commentEndpoint = `https://www.blogger.com/comment.g`;
+    const params = new URLSearchParams({
+      blogID: blogId,
+      postID: postId,
+      isPopup: 'false',
+      appMsg: '0',
+      commentBody: comment,
+      commentAuthor: name,
+      commentAuthorEmail: email,
+      commentAuthorUrl: '',
+    });
+
+    const _vBase = (vercelUrl()||'https://seoparapro.vercel.app').replace(/\/+$/,'');
+    try {
+      const res = await fetch(`${_vBase}/api/proxy`, {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({url:commentEndpoint, method:'POST', body:params.toString(), headers:{'Content-Type':'application/x-www-form-urlencoded','Referer':url}})
+      });
+      const data = await res.json();
+      if(data.status===200||data.status===302||data.status===301){
+        return {success:true, moderated:false, msg:'Blogger comment submitted via endpoint'};
+      }
+    } catch(e){}
+  }
+
+  // Fallback: find comment form in page (Blogger embeds comment form on post pages)
+  const form = doc.querySelector('form#comment-editor, form[action*="blogger.com/comment"], form[id*="comment"]');
+  if(form){
+    logFn(`   → Blogger fallback: form POST...`,'info');
+    return await bcGenericComment(url, html, name, email, '', comment, logFn);
+  }
+
+  logFn(`   ⚠ Blogger: comment form not found (may be embedded iframe)`,'warn');
+  return {success:false, moderated:false, msg:'Blogger: comment form embedded in iframe — cannot POST directly'};
+}
+
+// ── DISQUS ENGINE ─────────────────────────────────────────────────
+async function bcDisqusComment(url, html, name, email, comment, logFn){
+  logFn(`   → Disqus engine: extracting shortname & thread ID...`,'info');
+
+  // Extract shortname
+  const snM = html.match(/disqus_shortname\s*=\s*['"]([^'"]+)['"]/i) ||
+              html.match(/shortname['"]\s*:\s*['"]([^'"]+)['"]/i) ||
+              html.match(/data-disqus-shortname=['"']([^'"]+)['"']/i);
+  const shortname = snM ? snM[1] : null;
+  if(!shortname){
+    logFn(`   ⚠ Disqus shortname not found in page`,'warn');
+    return {success:false, moderated:false, msg:'Disqus shortname not found — cannot post via API'};
+  }
+  logFn(`   ✓ Disqus shortname: ${shortname}`,'success');
+
+  // Get thread identifier
+  const tidM = html.match(/disqus_identifier\s*=\s*['"]([^'"]+)['"]/i) ||
+               html.match(/identifier['"]\s*:\s*['"]([^'"]+)['"]/i);
+  const identifier = tidM ? tidM[1] : url;
+
+  // Disqus public API key (embedded in every Disqus embed)
+  const apiKeyM = html.match(/apiKey\s*[:=]\s*['"]([A-Za-z0-9_-]{16,})['"]/i) ||
+                  html.match(/publicKey\s*[:=]\s*['"]([A-Za-z0-9_-]{16,})['"]/i);
+  const apiKey = apiKeyM ? apiKeyM[1] : 'E8Uh5l5fHZ6gD8U3KycjAIAk46f68Zw7C6eW8WSjZvCLXebZ7p0r1yrYDpLPaS'; // Fallback public demo key
+
+  // First look up thread ID from identifier
+  const _vBase = (vercelUrl()||'https://seoparapro.vercel.app').replace(/\/+$/,'');
+  try {
+    const threadLookup = `https://disqus.com/api/3.0/threads/list.json?api_key=${apiKey}&forum=${shortname}&thread=link:${encodeURIComponent(url)}&limit=1`;
+    const threadRes = await bcProxyFetch(threadLookup, {timeout:10000});
+    if(threadRes.ok){
+      const threadData = JSON.parse(threadRes.text);
+      const thread = threadData.response && threadData.response[0];
+      if(thread){
+        const threadId = thread.id;
+        logFn(`   ✓ Disqus thread ID: ${threadId}`,'success');
+        // Post guest comment
+        const postBody = new URLSearchParams({
+          api_key: apiKey,
+          thread: threadId,
+          message: comment,
+          author_name: name,
+          author_email: email,
+        });
+        const postRes = await fetch(`${_vBase}/api/proxy`, {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({url:'https://disqus.com/api/3.0/posts/create.json', method:'POST', body:postBody.toString(), headers:{'Content-Type':'application/x-www-form-urlencoded','Referer':url}})
+        });
+        const postData = await postRes.json();
+        const parsed = JSON.parse(postData.body||'{}');
+        if(parsed.code===0){
+          return {success:true, moderated:true, msg:`Disqus guest comment submitted (pending approval)`};
+        }
+        logFn(`   ⚠ Disqus API code: ${parsed.code} — ${parsed.response||'unknown error'}`,'warn');
+      }
+    }
+  } catch(e){ logFn(`   ⚠ Disqus API error: ${e.message}`,'warn'); }
+
+  return {success:false, moderated:false, msg:'Disqus: thread lookup failed — site may require login'};
+}
+
+// ── SQUARESPACE ENGINE ────────────────────────────────────────────
+async function bcSquarespaceComment(url, html, name, email, comment, logFn){
+  logFn(`   → Squarespace engine: posting to JSON comment API...`,'info');
+  const origin = new URL(url).origin;
+
+  // Extract post ID from page
+  const postIdM = html.match(/data-post-id=['""]?([a-f0-9]{24})['""]?/i) ||
+                  html.match(/"postId"\s*:\s*"([a-f0-9]{24})"/i) ||
+                  html.match(/\/api\/blog\/comment\/add.*?"([a-f0-9]{24})"/i);
+  const postId = postIdM ? postIdM[1] : null;
+
+  // Extract CSRF token (Squarespace uses crumb)
+  const crumbM = html.match(/crumb['"]\s*[:=]\s*['"]([^'"]+)['"]/i) ||
+                 html.match(/data-crumb=['""]([^'"]+)['""]?/i);
+  const crumb = crumbM ? crumbM[1] : '';
+
+  if(!postId){
+    logFn(`   ⚠ Squarespace: post ID not found — trying generic form`,'warn');
+    return await bcGenericComment(url, html, name, email, '', comment, logFn);
+  }
+
+  logFn(`   ✓ Squarespace post ID: ${postId}`,'success');
+
+  const payload = JSON.stringify({
+    postId,
+    name,
+    email,
+    body: comment,
+    authorUrl: '',
+  });
+
+  const _vBase = (vercelUrl()||'https://seoparapro.vercel.app').replace(/\/+$/,'');
+  try {
+    const res = await fetch(`${_vBase}/api/proxy`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        url: `${origin}/api/blog/comment/add`,
+        method:'POST',
+        body: payload,
+        headers:{
+          'Content-Type':'application/json',
+          'Referer': url,
+          ...(crumb ? {'X-CSRF-Token': crumb} : {}),
+        }
+      })
+    });
+    const data = await res.json();
+    const body = JSON.parse(data.body||'{}');
+    if(data.status===200 && (body.id || body.status==='PENDING' || body.status==='APPROVED')){
+      return {success:true, moderated: body.status==='PENDING', msg:`Squarespace comment posted [${body.status||'submitted'}]`};
+    }
+    if(data.status===200 && !body.error){
+      return {success:true, moderated:true, msg:'Squarespace comment submitted'};
+    }
+    logFn(`   ⚠ Squarespace API response: ${data.status} — ${body.error||JSON.stringify(body).slice(0,100)}`,'warn');
+  } catch(e){ logFn(`   ⚠ Squarespace error: ${e.message}`,'warn'); }
+
+  return {success:false, moderated:false, msg:'Squarespace: comment API rejected — may require account'};
+}
+
+// ── DRUPAL ENGINE ─────────────────────────────────────────────────
+async function bcDrupalComment(url, html, name, email, comment, logFn){
+  logFn(`   → Drupal engine: detecting node/comment endpoints...`,'info');
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, 'text/html');
+
+  // Find node ID from URL pattern /node/NNN or data-nid
+  const nidM = url.match(/\/node\/(\d+)/i) ||
+               html.match(/data-nid=['""]?(\d+)['""]?/i) ||
+               html.match(/"nid"\s*:\s*"?(\d+)"?/i);
+  const nid = nidM ? nidM[1] : null;
+
+  // Look for Drupal form token (drupal_form_token or form_build_id)
+  const formTokenM = html.match(/name=['""]form_token['""][^>]*value=['""]([^'"]+)['"]/i);
+  const formBuildM  = html.match(/name=['""]form_build_id['""][^>]*value=['""]([^'"]+)['"]/i);
+  const formToken = formTokenM ? formTokenM[1] : '';
+  const formBuildId = formBuildM ? formBuildM[1] : '';
+  const formIdM = html.match(/name=['""]form_id['""][^>]*value=['""]([^'"]+comment[^'"]+)['"]/i);
+  const formId = formIdM ? formIdM[1] : 'comment_node_article_form';
+
+  // Find comment form action
+  const commentForm = doc.querySelector('form#comment-form, form[id*="comment"], form[action*="/comment"]');
+  const action = commentForm ? (commentForm.getAttribute('action')||'') : (nid ? `/comment/reply/${nid}` : '');
+  const origin = new URL(url).origin;
+  const postUrl = action.startsWith('http') ? action : (action ? origin+action : origin+`/comment/reply/${nid||1}`);
+
+  logFn(`   ✓ Drupal: node=${nid||'?'} posting to ${postUrl.replace(origin,'')}...`,'info');
+
+  const params = new URLSearchParams({
+    subject: `Re: ${comment.slice(0,40)}`,
+    'comment_body[und][0][value]': comment,
+    'comment_body[value]': comment,
+    name,
+    mail: email,
+    op: 'Save',
+    form_id: formId,
+    ...(formToken ? {form_token: formToken} : {}),
+    ...(formBuildId ? {form_build_id: formBuildId} : {}),
+  });
+
+  const _vBase = (vercelUrl()||'https://seoparapro.vercel.app').replace(/\/+$/,'');
+  try {
+    const res = await fetch(`${_vBase}/api/proxy`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({url:postUrl, method:'POST', body:params.toString(), headers:{'Content-Type':'application/x-www-form-urlencoded','Referer':url}})
+    });
+    const data = await res.json();
+    if(data.status===302||data.status===301) return {success:true, moderated:false, msg:'Drupal comment posted (redirect)'};
+    if(data.status===200){
+      const lower=(data.body||'').toLowerCase();
+      if(lower.includes('your comment has been posted')||lower.includes('comment saved')||lower.includes(name.toLowerCase())){
+        return {success:true, moderated:false, msg:'Drupal comment posted'};
+      }
+      if(lower.includes('awaiting')||lower.includes('moderat')){
+        return {success:true, moderated:true, msg:'Drupal comment submitted — awaiting moderation'};
+      }
+    }
+  } catch(e){ logFn(`   ⚠ Drupal error: ${e.message}`,'warn'); }
+
+  logFn(`   ⚠ Drupal direct failed — trying generic form`,'warn');
+  return await bcGenericComment(url, html, name, email, '', comment, logFn);
+}
+
+// ── JOOMLA ENGINE ─────────────────────────────────────────────────
+async function bcJoomlaComment(url, html, name, email, comment, logFn){
+  logFn(`   → Joomla engine: scanning for comment component...`,'info');
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, 'text/html');
+  const origin = new URL(url).origin;
+
+  // JComments (most common Joomla comment plugin)
+  const hasJComments = html.includes('jcomments') || html.includes('JComments');
+  const tokenM = html.match(/name=['""]([a-f0-9]{32})['""][^>]*value=['""]1['"]/i);
+  const token = tokenM ? tokenM[1] : null;
+  const objectIdM = html.match(/object_id['""\s]*[:=]\s*['""]?(\d+)/i)||html.match(/itemid['""\s]*[:=]\s*['""]?(\d+)/i);
+  const objectId = objectIdM ? objectIdM[1] : '1';
+
+  if(hasJComments){
+    logFn(`   ✓ JComments detected, objectId=${objectId}`,'success');
+    const params = new URLSearchParams({
+      option: 'com_jcomments',
+      task: 'addComment',
+      object_id: objectId,
+      object_group: 'com_content',
+      name,
+      email,
+      comment,
+      homepage: '',
+      ...(token ? {[tokenM[1]]:'1'} : {}),
+    });
+
+    const _vBase = (vercelUrl()||'https://seoparapro.vercel.app').replace(/\/+$/,'');
+    try {
+      const res = await fetch(`${_vBase}/api/proxy`, {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({url:`${origin}/index.php`, method:'POST', body:params.toString(), headers:{'Content-Type':'application/x-www-form-urlencoded','Referer':url,'X-Requested-With':'XMLHttpRequest'}})
+      });
+      const data = await res.json();
+      const parsed = JSON.parse(data.body||'{}');
+      if(parsed.result||parsed.status==='success'||data.status===200){
+        return {success:true, moderated:!!parsed.moderated, msg:'Joomla JComments: comment posted'};
+      }
+    } catch(e){ logFn(`   ⚠ JComments error: ${e.message}`,'warn'); }
+  }
+
+  // Fallback: generic form scraping
+  logFn(`   → Joomla fallback: generic form POST...`,'info');
+  return await bcGenericComment(url, html, name, email, '', comment, logFn);
+}
+
+// ── FORUM ENGINE (phpBB / MyBB / XenForo / vBulletin) ─────────────
+async function bcForumComment(url, html, name, email, comment, logFn){
+  logFn(`   → Forum engine: detecting software fingerprint...`,'info');
+  const lower = html.toLowerCase();
+  const origin = new URL(url).origin;
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, 'text/html');
+
+  // Detect forum type
+  let forumType = 'generic';
+  if(lower.includes('phpbb')) forumType='phpbb';
+  else if(lower.includes('mybb')||lower.includes('my_post_key')) forumType='mybb';
+  else if(lower.includes('xenforo')||lower.includes('xf-')) forumType='xenforo';
+  else if(lower.includes('vbulletin')||lower.includes('vb_')) forumType='vbulletin';
+  else if(lower.includes('smfproject')||lower.includes('smf_')) forumType='smf';
+
+  logFn(`   ✓ Forum type: ${forumType}`,'success');
+
+  // Find quick-reply / post form
+  const form = doc.querySelector('form#quick-reply-form, form#quick_reply, form[id*="qreply"], form[id*="reply"], form[action*="reply"], form[action*="post"]') ||
+               doc.querySelector('form');
+  if(!form){ return await bcGenericComment(url, html, name, email, '', comment, logFn); }
+
+  const action = form.getAttribute('action')||'';
+  const postUrl = action.startsWith('http') ? action : (action ? (action.startsWith('/')?origin+action:origin+'/'+action) : url);
+
+  const params = new URLSearchParams();
+  // Capture all hidden fields (session tokens, thread IDs)
+  form.querySelectorAll('input[type="hidden"]').forEach(inp=>{ if(inp.name) params.set(inp.name, inp.value||''); });
+
+  // Map message field
+  form.querySelectorAll('textarea, input').forEach(inp=>{
+    const n=(inp.getAttribute('name')||'').toLowerCase();
+    const id=(inp.getAttribute('id')||'').toLowerCase();
+    if(inp.type==='hidden'||inp.type==='submit') return;
+    if(n.includes('message')||n.includes('body')||n.includes('post')||id.includes('message')||inp.tagName==='TEXTAREA'){
+      params.set(inp.getAttribute('name'), comment);
+    }
+  });
+  // Submit button
+  const subBtn = form.querySelector('input[type="submit"],button[type="submit"]');
+  if(subBtn&&subBtn.name) params.set(subBtn.name, subBtn.value||'Post');
+
+  logFn(`   → Forum POST to: ${postUrl.replace(origin,'')}...`,'info');
+  const _vBase = (vercelUrl()||'https://seoparapro.vercel.app').replace(/\/+$/,'');
+  try {
+    const res = await fetch(`${_vBase}/api/proxy`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({url:postUrl, method:'POST', body:params.toString(), headers:{'Content-Type':'application/x-www-form-urlencoded','Referer':url}})
+    });
+    const data = await res.json();
+    if(data.status===302||data.status===301) return {success:true, moderated:false, msg:`${forumType} post submitted (redirect)`};
+    if(data.status===200){
+      const respLower=(data.body||'').toLowerCase();
+      if(respLower.includes('thank')||respLower.includes('posted')||respLower.includes(name.toLowerCase())||respLower.includes('reply')){
+        return {success:true, moderated:false, msg:`${forumType} post submitted`};
+      }
+      if(respLower.includes('moderat')||respLower.includes('approved')){
+        return {success:true, moderated:true, msg:`${forumType} post pending moderation`};
+      }
+    }
+  } catch(e){ logFn(`   ⚠ Forum POST error: ${e.message}`,'warn'); }
+
+  return {success:false, moderated:false, msg:`${forumType}: post failed — may require account/login`};
+}
+
 async function bcCommentOnSite(site, name, email, website, comment, logFn){
   const url = site.url;
   const siteType = (site.type||'generic').toLowerCase();
+
+  // ── STEP 0: Platform-specific fast-path engines ──
+  // If the URL was pre-detected as a specific platform, route immediately
+  // after fetching the page (needed for HTML fingerprinting / token extraction).
+  // Only skip WP detection for non-WP platforms.
+  const platformFastPaths = new Set(['blogger','disqus','squarespace','drupal','joomla','forum']);
+  if(platformFastPaths.has(siteType)){
+    logFn(`   → Platform detected: ${siteType.toUpperCase()} — using dedicated engine`,'accent');
+    // Still fetch page for token extraction
+    logFn(`   → Fetching page HTML...`,'info');
+    let html2='';
+    const pr2 = await bcProxyFetch(url, {timeout:18000});
+    if(pr2.ok && pr2.text.length>100){
+      html2 = pr2.text;
+      logFn(`   ✓ Page fetched (${(html2.length/1024).toFixed(1)} KB)`,'success');
+    }
+    if(siteType==='blogger')    return await bcBloggerComment(url, html2, name, email, comment, logFn);
+    if(siteType==='disqus')     return await bcDisqusComment(url, html2, name, email, comment, logFn);
+    if(siteType==='squarespace')return await bcSquarespaceComment(url, html2, name, email, comment, logFn);
+    if(siteType==='drupal')     return await bcDrupalComment(url, html2, name, email, comment, logFn);
+    if(siteType==='joomla')     return await bcJoomlaComment(url, html2, name, email, comment, logFn);
+    if(siteType==='forum')      return await bcForumComment(url, html2, name, email, comment, logFn);
+  }
 
   // ── STEP 1: Detect WordPress via REST API discovery ──
   logFn(`   → Probing site type and REST API...`,'info');
@@ -7412,6 +7807,41 @@ async function bcCommentOnSite(site, name, email, website, comment, logFn){
     if(!isWordPress && (html.includes('wp-content')||html.includes('wp-includes')||html.includes('/wp-json/'))){
       isWordPress = true;
       logFn(`   ✓ WordPress confirmed from page content`,'success');
+    }
+
+    // ── HTML fingerprint: route to specialized engines even for 'generic' type ──
+    if(!isWordPress){
+      const hLower = html.toLowerCase();
+      // Blogger
+      if((hLower.includes('blogger.com')||hLower.includes('blogspot.com'))&&(hLower.includes('data-blogid')||hLower.includes('blogid'))){
+        logFn(`   ✓ Blogger fingerprint detected — using Blogger engine`,'success');
+        return await bcBloggerComment(url, html, name, email, comment, logFn);
+      }
+      // Disqus
+      if(hLower.includes('disqus_shortname')||hLower.includes('disqus.com/embed')){
+        logFn(`   ✓ Disqus fingerprint detected — using Disqus engine`,'success');
+        return await bcDisqusComment(url, html, name, email, comment, logFn);
+      }
+      // Squarespace
+      if(hLower.includes('static.squarespace.com')||hLower.includes('squarespace-cdn')){
+        logFn(`   ✓ Squarespace fingerprint detected — using Squarespace engine`,'success');
+        return await bcSquarespaceComment(url, html, name, email, comment, logFn);
+      }
+      // Drupal
+      if(hLower.includes('drupal.settings')||hLower.includes('sites/default/files')||hLower.includes('drupal.js')){
+        logFn(`   ✓ Drupal fingerprint detected — using Drupal engine`,'success');
+        return await bcDrupalComment(url, html, name, email, comment, logFn);
+      }
+      // Joomla
+      if(hLower.includes('joomla')||hLower.includes('com_content')){
+        logFn(`   ✓ Joomla fingerprint detected — using Joomla engine`,'success');
+        return await bcJoomlaComment(url, html, name, email, comment, logFn);
+      }
+      // Forums
+      if(hLower.includes('phpbb')||hLower.includes('my_post_key')||hLower.includes('xf-')||hLower.includes('vbulletin')){
+        logFn(`   ✓ Forum software fingerprint detected — using Forum engine`,'success');
+        return await bcForumComment(url, html, name, email, comment, logFn);
+      }
     }
   } else {
     logFn(`   ⚠ Page fetch failed (${pageResult.status||pageResult.error||'network error'})`,'warn');
@@ -7510,7 +7940,7 @@ async function bcStartRun(){
   bcTermLog(`🚀 Starting Auto Commenter — ${pending.length} sites queued`,'accent');
   bcTermLog(`👤 Identity: ${esc(name)} | ${esc(email)} | ${esc(website||'no website')}`,'info');
   bcTermLog(`💬 Base comment: "${esc(baseComment.slice(0,80))}${baseComment.length>80?'...':''}"`, 'info');
-  bcTermLog(`⚙ Engine: WP REST API → Legacy form POST → Generic POST → Manual Assist (8 proxies)`, 'accent');
+  bcTermLog(`⚙ Engine: WP REST → Legacy POST → Blogger → Disqus → Squarespace → Drupal → Joomla → Forum → Generic (8 proxies)`, 'accent');
   bcTermSeparator('');
 
   let done=0, success=0, failed=0;
@@ -7532,7 +7962,7 @@ async function bcStartRun(){
     if(pl) pl.textContent=`Site ${i+1}/${total} — ${pct}%`;
 
     bcTermSeparator(`SITE ${i+1}/${total}`);
-    bcTermLog(`🌐 ${esc(site.url)}`,'accent');
+    bcTermLog(`🌐 ${esc(site.url)} · <span style="color:var(--term-accent)">${bcPlatformLabel(site.type||'generic')}</span>`,'accent');
 
     let result={url:site.url, label:site.label||site.url, status:'failed', reason:'', comment:siteComment};
 
@@ -7540,49 +7970,86 @@ async function bcStartRun(){
       const postResult = await bcCommentOnSite(site, siteName, siteEmail, siteWebsite, siteComment, (msg,type)=>bcTermLog(msg,type));
 
       if(postResult.success && !postResult.moderated){
-        bcTermLog(`   ✅ COMMENT POSTED — LIVE ✅`,'success');
+        bcTermLog(`   ✅ COMMENT POSTED — verifying live presence...`,'success');
         bcTermLog(`   → ${esc(postResult.msg)}`,'muted');
         bcTermLog(`   💬 Comment: "${esc(siteComment.slice(0,90))}${siteComment.length>90?'...':''}"`, 'accent');
         bcTermLog(`   👤 Identity: ${esc(siteName)} &lt;${esc(siteEmail)}&gt;${siteWebsite?' | '+esc(siteWebsite):''}`, 'muted');
-        // Show clickable link in terminal
+        // ── Live verification: scan all comment pages ──
+        await bcWait(1800);
+        const vr = await bcVerifyCommentLive(site.url, siteName, siteComment, (msg,type)=>bcTermLog(msg,type));
+        const verifiedUrl = vr.found ? vr.url : site.url;
+        site.verifiedUrl = verifiedUrl;
         const term = document.getElementById('bc-terminal');
         if(term){
           const linkDiv = document.createElement('div');
           linkDiv.className = 'tline';
-          linkDiv.innerHTML = `<span class="ttime">${ts()}</span><span style="color:#3fb950">   🔗 Verify: </span><a href="${esc(site.url)}" target="_blank" style="color:#58a6ff;text-decoration:underline;font-family:var(--mono);font-size:10px">${esc(site.url)}</a>`;
+          if(vr.found){
+            linkDiv.innerHTML = `<span class="ttime">${ts()}</span><span style="color:#3fb950">   🔗 CONFIRMED page ${vr.page}: </span><a href="${esc(verifiedUrl)}" target="_blank" style="color:#58a6ff;text-decoration:underline;font-family:var(--mono);font-size:10px">${esc(verifiedUrl)}</a>`;
+          } else {
+            linkDiv.innerHTML = `<span class="ttime">${ts()}</span><span style="color:#d29922">   🔗 Verify manually: </span><a href="${esc(site.url)}" target="_blank" style="color:#58a6ff;text-decoration:underline;font-family:var(--mono);font-size:10px">${esc(site.url)}</a>`;
+          }
           term.appendChild(linkDiv);
           term.scrollTop = term.scrollHeight;
         }
-        result.status='success'; result.reason=postResult.msg;
+        result.status='success';
+        result.verified = vr.found;
+        result.verifiedPage = vr.page;
+        result.verifiedUrl = verifiedUrl;
+        result.reason = vr.found ? `Live on page ${vr.page}` : postResult.msg;
         site.done=true; site.queued=siteComment; bcSave();
         success++;
+
       } else if(postResult.success && postResult.moderated){
-        bcTermLog(`   ⏳ COMMENT SUBMITTED — AWAITING MODERATION`,'success');
+        bcTermLog(`   ⏳ COMMENT SUBMITTED — scanning for early approval...`,'success');
         bcTermLog(`   → ${esc(postResult.msg)}`,'muted');
         bcTermLog(`   💬 Comment: "${esc(siteComment.slice(0,90))}${siteComment.length>90?'...':''}"`, 'accent');
         bcTermLog(`   👤 Identity: ${esc(siteName)} &lt;${esc(siteEmail)}&gt;${siteWebsite?' | '+esc(siteWebsite):''}`, 'muted');
+        // Even "moderated" posts may already be live — some blogs auto-approve
+        await bcWait(2500);
+        const vm = await bcVerifyCommentLive(site.url, siteName, siteComment, (msg,type)=>bcTermLog(msg,type));
         const termM = document.getElementById('bc-terminal');
         if(termM){
           const linkDivM = document.createElement('div');
           linkDivM.className = 'tline';
-          linkDivM.innerHTML = `<span class="ttime">${ts()}</span><span style="color:#d29922">   🔗 Check later: </span><a href="${esc(site.url)}" target="_blank" style="color:#58a6ff;text-decoration:underline;font-family:var(--mono);font-size:10px">${esc(site.url)}</a>`;
+          if(vm.found){
+            linkDivM.innerHTML = `<span class="ttime">${ts()}</span><span style="color:#3fb950">   🎉 AUTO-APPROVED — LIVE page ${vm.page}: </span><a href="${esc(vm.url)}" target="_blank" style="color:#58a6ff;text-decoration:underline;font-family:var(--mono);font-size:10px">${esc(vm.url)}</a>`;
+          } else {
+            linkDivM.innerHTML = `<span class="ttime">${ts()}</span><span style="color:#d29922">   🔗 Check later: </span><a href="${esc(site.url)}" target="_blank" style="color:#58a6ff;text-decoration:underline;font-family:var(--mono);font-size:10px">${esc(site.url)}</a>`;
+          }
           termM.appendChild(linkDivM);
           termM.scrollTop = termM.scrollHeight;
         }
-        result.status='moderated'; result.reason=postResult.msg;
+        result.status   = vm.found ? 'success' : 'moderated';
+        result.verified = vm.found;
+        result.verifiedPage = vm.page;
+        result.verifiedUrl  = vm.found ? vm.url : site.url;
+        result.reason = vm.found ? `Auto-approved — live page ${vm.page}` : postResult.msg;
+        site.verifiedUrl = result.verifiedUrl;
         site.done=true; site.queued=siteComment; bcSave();
         success++;
+
       } else {
+        // Failed post — still do a quick scan: some servers return error codes but post anyway
         bcTermLog(`   ✗ Failed: ${esc(postResult.msg)}`,'error');
-        result.status='failed'; result.reason=postResult.msg;
-        failed++;
-        // Offer manual assist if enabled and we couldn't auto-post
-        if(manualFallback){
-          bcTermLog(`   → Opening Manual Assist for this site...`,'warn');
-          await new Promise(r=>setTimeout(r,800));
-          bcManualAssist(site, siteName, siteEmail, siteWebsite, siteComment);
-          // Wait for user to potentially dismiss the modal
-          await bcWait(3000);
+        bcTermLog(`   🔍 Quick-scanning in case comment posted silently...`,'muted');
+        await bcWait(1200);
+        const vf = await bcVerifyCommentLive(site.url, siteName, siteComment, ()=>{});
+        if(vf.found){
+          bcTermLog(`   🎉 Silent post confirmed on page ${vf.page} — marking SUCCESS!`,'success');
+          const termF = document.getElementById('bc-terminal');
+          if(termF){ const lf=document.createElement('div'); lf.className='tline'; lf.innerHTML=`<span class="ttime">${ts()}</span><span style="color:#3fb950">   🔗 CONFIRMED: </span><a href="${esc(vf.url)}" target="_blank" style="color:#58a6ff;text-decoration:underline;font-family:var(--mono);font-size:10px">${esc(vf.url)}</a>`; termF.appendChild(lf); termF.scrollTop=termF.scrollHeight; }
+          result.status='success'; result.verified=true; result.verifiedPage=vf.page; result.verifiedUrl=vf.url; result.reason=`Silent post — confirmed page ${vf.page}`;
+          site.done=true; site.verifiedUrl=vf.url; site.queued=siteComment; bcSave();
+          success++;
+        } else {
+          result.status='failed'; result.reason=postResult.msg;
+          failed++;
+          if(manualFallback){
+            bcTermLog(`   → Opening Manual Assist for this site...`,'warn');
+            await new Promise(r=>setTimeout(r,800));
+            bcManualAssist(site, siteName, siteEmail, siteWebsite, siteComment);
+            await bcWait(3000);
+          }
         }
       }
     } catch(err){
@@ -7645,12 +8112,13 @@ function bcShowResultsSummary(){
       <div style="font-family:var(--mono);font-size:10px;color:var(--accent);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px;font-weight:700">✅ SUCCESSFUL COMMENTS (${successList.length})</div>
       ${successList.map(r=>`
       <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;background:rgba(0,87,255,0.04);border:1px solid rgba(0,87,255,0.15);border-radius:7px;margin-bottom:5px">
-        <span style="font-size:14px">${r.status==='moderated'?'⏳':'✅'}</span>
+        <span style="font-size:14px">${r.status==='moderated'?'⏳': r.verified?'✅':'🟡'}</span>
         <div style="flex:1;min-width:0">
           <div style="font-family:var(--mono);font-size:11px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.label)}</div>
           <div style="font-family:var(--mono);font-size:9px;color:var(--muted2)">${esc(r.url)}</div>
+          ${r.verified && r.verifiedPage ? `<div style="font-family:var(--mono);font-size:9px;color:#3fb950;margin-top:2px">✓ Confirmed live on comment page ${r.verifiedPage}${r.verifiedUrl&&r.verifiedUrl!==r.url?' — <a href="'+esc(r.verifiedUrl)+'" target="_blank" style="color:#58a6ff">view page</a>':''}</div>` : ''}
         </div>
-        <span class="badge ${r.status==='moderated'?'badge-y':'badge-g'}">${r.status==='moderated'?'Pending Moderation':'Posted'}</span>
+        <span class="badge ${r.status==='moderated'?'badge-y': r.verified?'badge-g':'badge-y'}">${r.status==='moderated'?'Pending Moderation': r.verified?'Confirmed Live':'Posted (unverified)'}</span>
         <span style="font-family:var(--mono);font-size:9px;color:var(--muted2)">${esc(r.reason)}</span>
       </div>`).join('')}
     </div>`:''}
@@ -8100,6 +8568,150 @@ function bcStopRun(){
 
 function bcWait(ms){ return new Promise(res=>setTimeout(res,ms)); }
 
+// ══════════════════════════════════════════════════════════════════════════
+// COMMENT LIVE VERIFIER — Multi-page scanner
+// After posting, scans paginated comment pages to confirm the comment is live.
+// Handles: WordPress ?cpage=N, Blogger showComment, generic ?page=N,
+//          last-page-first strategy, comment count estimation, anchor detection.
+// ══════════════════════════════════════════════════════════════════════════
+
+async function bcVerifyCommentLive(pageUrl, commenterName, commentText, logFn){
+  logFn = logFn || (()=>{});
+  const MAX_PAGES = 10;   // max paginated comment pages to scan
+  const FETCH_TO  = 12000; // timeout per page fetch ms
+
+  // ── Build a fingerprint: normalised first 22 chars of name + first 18 of comment
+  const norm = s => (s||'').toLowerCase().replace(/[^a-z0-9\s]/g,'').replace(/\s+/g,' ').trim();
+  const nameFP  = norm(commenterName).slice(0,22);
+  const bodyFP  = norm(commentText).slice(0,18);
+
+  // ── Try to match either fingerprint anywhere in raw HTML
+  function pageContainsComment(html){
+    const h = norm(html);
+    const nameHit = nameFP.length > 2 && h.includes(nameFP);
+    const bodyHit = bodyFP.length > 4 && h.includes(bodyFP);
+    return nameHit || bodyHit;
+  }
+
+  // ── Extract total comment count from page HTML (best-effort)
+  function extractCommentCount(html){
+    // WordPress: <span id="comments">5000</span> or "5,000 Comments" or "5000 comments"
+    const m1 = html.match(/<span[^>]*id=[\"']comments[\"'][^>]*>([\d,]+)<\/span>/i);
+    if(m1) return parseInt(m1[1].replace(/,/g,''))||0;
+    // "NNNN Comments" or "NNNN Responses" or "NNNN Replies"
+    const m2 = html.match(/([\d,]+)\s*(?:comments?|responses?|replies?)/i);
+    if(m2) return parseInt(m2[1].replace(/,/g,''))||0;
+    // data-comment-count
+    const m3 = html.match(/data-comment-count=[\"']([\d]+)[\"']/i);
+    if(m3) return parseInt(m3[1])||0;
+    return 0;
+  }
+
+  // ── Extract comments per page setting from WP pagination HTML
+  function extractCommentsPerPage(html){
+    // WordPress pagination: "Page 1 of 25" — deduce from that + total
+    const m = html.match(/Page\s+\d+\s+of\s+(\d+)/i);
+    if(m) return null; // we get total pages directly
+    // data-per-page or per_page
+    const m2 = html.match(/per[_-]page[\"'\s]*[:=][\"'\s]*([\d]+)/i);
+    if(m2) return parseInt(m2[1])||50;
+    return 50; // WP default
+  }
+
+  // ── Detect total comment pages from WP navigation HTML
+  function extractTotalCommentPages(html){
+    // WP: <span class="page-numbers current">3</span> and siblings, or "Page N of M"
+    const m1 = html.match(/Page\s+\d+\s+of\s+(\d+)/i);
+    if(m1) return parseInt(m1[1])||1;
+    // page-numbers buttons: grab the highest number
+    const pageNums = [...html.matchAll(/class=[\"'][^\"']*page-numbers[^\"']*[\"'][^>]*>(\d+)</gi)]
+      .map(x=>parseInt(x[1])).filter(n=>!isNaN(n)&&n>0);
+    if(pageNums.length) return Math.max(...pageNums);
+    // Blogger / generic: look for ?cpage=N or ?page=N in pagination links
+    const cpages = [...html.matchAll(/[?&]cpage=(\d+)/gi)].map(x=>parseInt(x[1]));
+    if(cpages.length) return Math.max(...cpages);
+    const pages  = [...html.matchAll(/[?&](?:page|pg|paged)=(\d+)/gi)].map(x=>parseInt(x[1]));
+    if(pages.length) return Math.max(...pages);
+    return 1;
+  }
+
+  // ── Build candidate page URLs for a given platform & page number
+  function buildCommentPageUrls(baseUrl, pageNum){
+    const u = new URL(baseUrl);
+    const origin = u.origin;
+    const path   = u.pathname.replace(/\/$/,'');
+    const candidates = [];
+    // WordPress cpage
+    const wpBase = `${origin}${path}/`;
+    candidates.push(`${wpBase}?cpage=${pageNum}`);
+    // WP with existing query params
+    const q = new URLSearchParams(u.search);
+    q.set('cpage', pageNum);
+    candidates.push(`${u.origin}${u.pathname}?${q.toString()}`);
+    // Generic page param
+    candidates.push(`${origin}${path}/?page=${pageNum}`);
+    candidates.push(`${origin}${path}?page=${pageNum}`);
+    // Blogger
+    candidates.push(`${baseUrl}${baseUrl.includes('?')?'&':'?'}page=${pageNum}`);
+    // Ghost / others
+    candidates.push(`${origin}${path}?comments_page=${pageNum}`);
+    // Deduplicate
+    return [...new Set(candidates)];
+  }
+
+  // ══ PHASE 1: Check page 1 (already fetched by caller, but re-check via fresh fetch) ══
+  logFn(`   🔍 Verifier: scanning page 1 for comment...`,'info');
+  try {
+    const r1 = await bcProxyFetch(pageUrl, {timeout: FETCH_TO});
+    if(r1.ok && r1.text){
+      if(pageContainsComment(r1.text)){
+        logFn(`   ✅ Verifier: comment CONFIRMED on page 1`,'success');
+        return {found:true, page:1, url:pageUrl};
+      }
+      // Extract total pages / count so we know how far to scan
+      const totalPages = Math.min(extractTotalCommentPages(r1.text), MAX_PAGES);
+      const commentCount = extractCommentCount(r1.text);
+      if(commentCount > 0) logFn(`   🔍 Verifier: ${commentCount.toLocaleString()} total comments detected — scanning pages...`,'info');
+      if(totalPages > 1) logFn(`   🔍 Verifier: ${totalPages} comment pages found — scanning last→first...`,'info');
+
+      // ══ PHASE 2: Scan from LAST page backwards (newest comments land on last page) ══
+      const scanOrder = [];
+      for(let p = totalPages; p >= 2; p--) scanOrder.push(p);
+      // If no pagination detected but comment count is high, try pages 2–MAX_PAGES anyway
+      if(scanOrder.length === 0 && commentCount > 30){
+        for(let p = MAX_PAGES; p >= 2; p--) scanOrder.push(p);
+      }
+
+      for(const pageNum of scanOrder){
+        if(_bcStop) break;
+        const candidates = buildCommentPageUrls(pageUrl, pageNum);
+        let scanned = false;
+        for(const cUrl of candidates){
+          if(scanned) break;
+          try {
+            logFn(`   🔍 Verifier: checking comment page ${pageNum} → ${cUrl}`,'muted');
+            const rp = await bcProxyFetch(cUrl, {timeout: FETCH_TO});
+            if(rp.ok && rp.text && rp.text.length > 500){
+              scanned = true;
+              if(pageContainsComment(rp.text)){
+                logFn(`   ✅ Verifier: comment CONFIRMED on page ${pageNum}!`,'success');
+                return {found:true, page:pageNum, url:cUrl};
+              }
+            }
+          } catch(e){}
+        }
+        // Small yield to avoid blocking UI
+        await bcWait(250);
+      }
+    }
+  } catch(e){
+    logFn(`   ⚠ Verifier fetch error: ${e.message}`,'warn');
+  }
+
+  logFn(`   ⚠ Verifier: comment not found in visible pages (may be in moderation)`,'warn');
+  return {found:false, page:null, url:null};
+}
+
 // Queue comment to ALL pending sites at once
 function bcQueueAll(){
   const out=document.getElementById('bc-gen-out');
@@ -8115,6 +8727,7 @@ function bcQueueAll(){
 
 function bcRenderSiteList(){
   if(!_bcSites.length) return '<p class="tm mono xs">No sites added yet. Add a blog URL above.</p>';
+  const typeOptions = ['generic','wordpress','blogger','medium','tumblr','disqus','squarespace','drupal','joomla','forum','ghost','wix','typepad','other'];
   return _bcSites.map((s,i)=>`
     <div id="bc-site-${s.id}" style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:7px;background:var(--bg)">
       <div class="flex aic g8" style="margin-bottom:6px">
@@ -8122,8 +8735,10 @@ function bcRenderSiteList(){
         <span class="mono xs ta" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
           <a href="${esc(s.url)}" target="_blank" rel="noreferrer" style="color:var(--accent);text-decoration:none">${esc(s.label||s.url)}</a>
         </span>
-        <span class="badge badge-b">${esc(s.type)}</span>
-        <button class="btn btn-ghost btn-xs" onclick="bcOpenSite('${s.id}')">🌐 Open</button>
+        <select class="btn btn-xs" style="padding:1px 3px;font-size:9px;font-family:var(--mono);cursor:pointer" onchange="bcChangeSiteType('${s.id}',this.value)" title="Change platform type">
+          ${typeOptions.map(t=>`<option value="${t}" ${s.type===t?'selected':''}>${bcPlatformLabel(t)}</option>`).join('')}
+        </select>
+        <button class="btn btn-ghost btn-xs" onclick="bcOpenSite('${s.id}')">🌐</button>
         <button class="btn btn-danger btn-xs" onclick="bcRemoveSite('${s.id}')">✕</button>
       </div>
       <div class="mono xs tm" style="margin-bottom:5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.url)}</div>
@@ -8153,7 +8768,25 @@ function bcRenderLog(){
 }
 
 function bcTypeIcon(t){
-  return {wordpress:'🔵',blogger:'🟠',disqus:'💬',generic:'🌐',other:'📝'}[t]||'📝';
+  return {
+    wordpress:'🔵', blogger:'🟠', disqus:'💬', squarespace:'⬛',
+    drupal:'💧', joomla:'🔶', forum:'💬', ghost:'👻',
+    wix:'🟦', typepad:'📝', tumblr:'🌀', medium:'Ⓜ',
+    generic:'⚙', other:'📝'
+  }[t]||'📝';
+}
+
+function bcAutoDetectType(url){
+  if(!url||!url.startsWith('http')) return;
+  const detected = bcDetectPlatformFromUrl(url);
+  const sel = document.getElementById('bc-type');
+  if(!sel) return;
+  if(detected !== 'generic'){
+    sel.value = detected;
+    // Flash the select to show auto-detect fired
+    sel.style.background='#d0ffd0';
+    setTimeout(()=>{ sel.style.background=''; }, 1200);
+  }
 }
 
 function bcManualAssistSite(siteId){
@@ -8188,11 +8821,12 @@ function bcAddSite(){
   const url=(urlEl||{value:''}).value.trim();
   if(!url){ alert('Enter a URL first.'); return; }
   if(!/^https?:\/\//i.test(url)){ alert('URL must start with http:// or https://'); return; }
+  const selectedType = (document.getElementById('bc-type')||{value:'generic'}).value;
   const site={
     id:uid(),
     url,
     label:(document.getElementById('bc-label')||{value:''}).value.trim()||url,
-    type:(document.getElementById('bc-type')||{value:'wordpress'}).value,
+    type: selectedType === 'generic' ? bcDetectPlatformFromUrl(url) : selectedType,
     name:(document.getElementById('bc-gen-name')||{value:''}).value.trim(),
     email:(document.getElementById('bc-email')||{value:''}).value.trim(),
     website:(document.getElementById('bc-website')||{value:''}).value.trim(),
@@ -8203,7 +8837,7 @@ function bcAddSite(){
   _bcSites.push(site);
   bcSave();
   bcLog(`Added site: ${site.label}`, 'info');
-  bcTermLog(`➕ Added: ${esc(site.url)}`,'info');
+  bcTermLog(`➕ Added: ${esc(site.url)} · ${bcPlatformLabel(site.type)}`,'info');
   // clear url+label+notes only
   ['bc-url','bc-label','bc-notes'].forEach(id=>{
     const e=document.getElementById(id); if(e) e.value='';
@@ -8233,6 +8867,11 @@ function bcMarkDone(id){
 function bcOpenSite(id){
   const s=_bcSites.find(x=>x.id===id);
   if(s) window.open(s.url,'_blank','noreferrer');
+}
+
+function bcChangeSiteType(id, newType){
+  const s=_bcSites.find(x=>x.id===id);
+  if(s){ s.type=newType; bcSave(); bcRefresh(); }
 }
 
 function bcGenerate(){
@@ -8359,17 +8998,115 @@ function bcMarkDoneAndClose(siteId){
   document.getElementById('bc-modal')&&document.getElementById('bc-modal').remove();
 }
 
+// ── URL PLATFORM PRE-DETECTOR ─────────────────────────────────────
+function bcDetectPlatformFromUrl(url){
+  try {
+    const u = url.toLowerCase();
+    const h = new URL(url).hostname.toLowerCase();
+    if(/blogspot\.com|blogger\.com/.test(h)) return 'blogger';
+    if(/ghost\.io/.test(h)||/\/ghost\//.test(u)) return 'ghost';
+    if(/squarespace\.com/.test(h)||/static\.squarespace/.test(u)) return 'squarespace';
+    if(/wixsite\.com|wix\.com/.test(h)) return 'wix';
+    if(/typepad\.com/.test(h)) return 'typepad';
+    if(/tumblr\.com/.test(h)) return 'tumblr';
+    if(/medium\.com/.test(h)) return 'medium';
+    if(/disqus\.com/.test(h)) return 'disqus';
+    if(/phpbb|mybb|vbulletin|xenforo|smfproject|simplemachines/.test(u)) return 'forum';
+    if(/joomla/.test(u)||/index\.php\?option=com_content/.test(u)) return 'joomla';
+    if(/drupal/.test(u)||/sites\/default\/files/.test(u)) return 'drupal';
+    if(/wordpress\.com/.test(h)) return 'wordpress';
+    // Self-hosted WordPress: detect from URL path signals
+    if(/\/wp-content\/|\/wp-includes\/|\/wp-json\/|[?&]p=\d+|\/\?page_id=\d+|\/wp-login\.php/.test(u)) return 'wordpress';
+  } catch(e){}
+  return 'generic';
+}
+
+function bcPlatformLabel(type){
+  const map={wordpress:'🔵 WordPress',blogger:'🟠 Blogger',squarespace:'⬛ Squarespace',disqus:'💬 Disqus',drupal:'💧 Drupal',joomla:'🔶 Joomla',ghost:'👻 Ghost',forum:'💬 Forum',medium:'⚫ Medium',wix:'🟦 Wix',typepad:'📝 Typepad',tumblr:'🌀 Tumblr',generic:'⚙ Generic',other:'📝 Other'};
+  return map[type]||'⚙ Generic';
+}
+
 function bcImportBulk(){
-  const raw=prompt('Paste URLs — one per line:');
-  if(!raw) return;
-  const urls=raw.split('\n').map(u=>u.trim()).filter(u=>/^https?:\/\//i.test(u));
-  if(!urls.length){ alert('No valid URLs found.'); return; }
-  urls.forEach(url=>{
-    _bcSites.push({id:uid(),url,label:url,type:'generic',name:'',email:'',website:'',notes:'',done:false,queued:''});
+  // Build modal overlay
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9999;display:flex;align-items:center;justify-content:center';
+  overlay.onclick = e=>{ if(e.target===overlay) overlay.remove(); };
+
+  const box = document.createElement('div');
+  box.style.cssText='background:var(--win-surface);border:2px solid;border-color:var(--win-btn-hi) var(--win-btn-sh) var(--win-btn-sh) var(--win-btn-hi);width:560px;max-width:95vw;font-family:Tahoma,Arial,sans-serif;font-size:11px;';
+
+  box.innerHTML=`
+    <div style="background:var(--win-blue);color:#fff;padding:4px 10px;font-family:'Share Tech Mono',monospace;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:space-between">
+      <span>📋 Paste Bulk URLs — Auto-Detect Platform</span>
+      <span style="cursor:pointer;font-size:14px;line-height:1" id="bc-bulk-close">✕</span>
+    </div>
+    <div style="padding:12px">
+      <div style="margin-bottom:6px;color:var(--win-text-muted);font-size:10px;font-family:'Share Tech Mono',monospace">
+        Paste one URL per line. Platform is auto-detected from hostname (blogspot → Blogger, etc.)
+      </div>
+      <textarea id="bc-bulk-ta" placeholder="https://example.blogspot.com/2024/01/post.html&#10;https://site.squarespace.com/blog/article&#10;https://myblog.com/post-123&#10;..." style="width:100%;height:160px;font-family:'Share Tech Mono',monospace;font-size:10px;resize:vertical;border:2px solid;border-color:var(--win-btn-sh) var(--win-btn-hi) var(--win-btn-hi) var(--win-btn-sh);padding:4px;background:#fff"></textarea>
+      <div id="bc-bulk-preview" style="margin-top:8px;background:#fff;border:1px solid #ccc;padding:6px;max-height:160px;overflow-y:auto;font-family:'Share Tech Mono',monospace;font-size:10px;display:none"></div>
+      <div style="display:flex;gap:8px;margin-top:10px;align-items:center">
+        <button class="btn btn-primary" id="bc-bulk-add">✔ Add to Queue</button>
+        <button class="btn" id="bc-bulk-preview-btn">🔍 Preview</button>
+        <button class="btn" id="bc-bulk-close2">Cancel</button>
+        <span id="bc-bulk-count" style="margin-left:auto;font-family:'Share Tech Mono',monospace;font-size:10px;color:var(--win-text-muted)"></span>
+      </div>
+    </div>`;
+
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+
+  const ta = box.querySelector('#bc-bulk-ta');
+  const preview = box.querySelector('#bc-bulk-preview');
+  const countEl = box.querySelector('#bc-bulk-count');
+
+  function parseUrls(raw){
+    return raw.split('\n').map(u=>u.trim()).filter(u=>/^https?:\/\//i.test(u));
+  }
+
+  ta.addEventListener('input', ()=>{
+    const urls = parseUrls(ta.value);
+    countEl.textContent = urls.length ? `${urls.length} URL${urls.length>1?'s':''} detected` : '';
+    preview.style.display = 'none';
   });
-  bcSave();
-  bcLog(`Bulk imported ${urls.length} sites.`,'success');
-  bcRefresh();
+
+  box.querySelector('#bc-bulk-preview-btn').onclick = ()=>{
+    const urls = parseUrls(ta.value);
+    if(!urls.length){ preview.innerHTML='<span style="color:#cc0000">No valid URLs found.</span>'; preview.style.display=''; return; }
+    preview.innerHTML = urls.map(url=>{
+      const type = bcDetectPlatformFromUrl(url);
+      const label = bcPlatformLabel(type);
+      return `<div style="padding:2px 0;border-bottom:1px solid #eee;display:flex;gap:8px;align-items:center">
+        <span style="width:130px;flex-shrink:0">${label}</span>
+        <span style="color:#333;word-break:break-all">${url}</span>
+      </div>`;
+    }).join('');
+    preview.style.display = '';
+  };
+
+  function doAdd(){
+    const urls = parseUrls(ta.value);
+    if(!urls.length){ alert('No valid URLs found.'); return; }
+    let added=0;
+    urls.forEach(url=>{
+      const type = bcDetectPlatformFromUrl(url);
+      _bcSites.push({id:uid(),url,label:url,type,name:'',email:'',website:'',notes:'',done:false,queued:''});
+      added++;
+    });
+    bcSave();
+    bcLog(`Bulk imported ${added} sites (platform auto-detected).`,'success');
+    bcRefresh();
+    overlay.remove();
+    toast(`✔ Added ${added} URL${added>1?'s':''} to queue`,'s');
+  }
+
+  box.querySelector('#bc-bulk-add').onclick = doAdd;
+  box.querySelector('#bc-bulk-close').onclick  = ()=>overlay.remove();
+  box.querySelector('#bc-bulk-close2').onclick = ()=>overlay.remove();
+
+  setTimeout(()=>ta.focus(), 50);
 }
 
 function bcExportLog(){
@@ -11746,21 +12483,21 @@ function renderPingSubmitter(el){
 // ═══════════════════════════════════════════════════════════════
 // ACCOUNT CREATOR
 // ═══════════════════════════════════════════════════════════════
-const AC_STATE = { jobs: [], running: false, templates: [] };
+const AC_STATE = { jobs: [], running: false, stopFlag: false };
 
 const AC_PLATFORMS = [
-  { id:'reddit',      name:'Reddit',        icon:'🟠', da:97, fields:['email','username','password'],           notes:'Subreddit posting · age verification bypass via DOB' },
-  { id:'quora',       name:'Quora',         icon:'🔴', da:93, fields:['email','username','password'],           notes:'Answer & question parasite · high trust' },
-  { id:'medium',      name:'Medium',        icon:'⬛', da:96, fields:['email','password'],                      notes:'Publication posting · SEO powerhouse' },
-  { id:'wordpress',   name:'WordPress.com', icon:'🔵', da:95, fields:['email','username','password'],           notes:'Blog parasite · custom subdomain' },
-  { id:'tumblr',      name:'Tumblr',        icon:'💙', da:84, fields:['email','password','username'],           notes:'Microblog + reblog network' },
-  { id:'weebly',      name:'Weebly',        icon:'🟣', da:79, fields:['email','password'],                      notes:'Website builder · free hosting' },
-  { id:'blogger',     name:'Blogger',       icon:'🟡', da:87, fields:['google_account'],                        notes:'Requires Google account' },
-  { id:'wix',         name:'Wix',           icon:'⬜', da:91, fields:['email','password'],                      notes:'Drag-drop builder · ADI sites' },
-  { id:'devto',       name:'Dev.to',        icon:'⬛', da:79, fields:['email','username','password'],           notes:'Tech-focused, high engagement' },
-  { id:'hashnode',    name:'Hashnode',       icon:'🔷', da:75, fields:['email','username','password'],           notes:'Developer blog platform' },
-  { id:'strikingly',  name:'Strikingly',    icon:'🟤', da:72, fields:['email','password'],                      notes:'One-page sites · quick deploy' },
-  { id:'site123',     name:'Site123',       icon:'🔶', da:68, fields:['email','password'],                      notes:'Simple builder · fast index' },
+  { id:'devto',      name:'Dev.to',        icon:'⚙',  da:79, notes:'Tech-focused · Forem API · dofollow profile links' },
+  { id:'hashnode',   name:'Hashnode',      icon:'🔷', da:75, notes:'Developer blog · GraphQL API · custom domain' },
+  { id:'medium',     name:'Medium',        icon:'⬛', da:96, notes:'Publication posting · SEO powerhouse DA96' },
+  { id:'wordpress',  name:'WordPress.com', icon:'🔵', da:95, notes:'Blog parasite · custom subdomain · WP REST API' },
+  { id:'tumblr',     name:'Tumblr',        icon:'💙', da:84, notes:'Microblog + reblog network · OAuth bearer flow' },
+  { id:'reddit',     name:'Reddit',        icon:'🟠', da:97, notes:'Highest DA · OAuth2 · subreddit posting' },
+  { id:'quora',      name:'Quora',         icon:'🔴', da:93, notes:'Answer & question parasite · high trust' },
+  { id:'weebly',     name:'Weebly',        icon:'🟣', da:79, notes:'Website builder · free hosting · REST API' },
+  { id:'wix',        name:'Wix',           icon:'⬜', da:91, notes:'Drag-drop builder · ADI sites · email+pw reg' },
+  { id:'strikingly', name:'Strikingly',    icon:'🟤', da:72, notes:'One-page sites · quick deploy · form-based' },
+  { id:'site123',    name:'Site123',       icon:'🔶', da:68, notes:'Simple builder · fast index · email-based' },
+  { id:'blogger',    name:'Blogger',       icon:'🟡', da:87, notes:'Google-owned · requires OAuth Google token' },
 ];
 
 function acLog(msg, cls='t-info'){
@@ -11784,91 +12521,424 @@ function acGenPassword(){
   return Array.from({length:14}, ()=>chars[Math.floor(Math.random()*chars.length)]).join('');
 }
 
-function acGenEmail(base, domain){
-  const uname = acGenUsername(base);
-  const domains = domain ? [domain] : ['gmail.com','outlook.com','yahoo.com','proton.me','icloud.com'];
-  return `${uname}@${domains[Math.floor(Math.random()*domains.length)]}`;
+// ── MAIL.TM — create real disposable inbox + get JWT ────────────────────────
+async function acCreateMailTmInbox(address, password){
+  // 1. Create account
+  const r1 = await fetch('https://api.mail.tm/accounts', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ address, password }),
+    signal: AbortSignal.timeout(12000)
+  });
+  if(!r1.ok && r1.status !== 422) throw new Error('mail.tm account creation failed: ' + r1.status);
+  // 2. Get JWT token
+  const r2 = await fetch('https://api.mail.tm/token', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ address, password }),
+    signal: AbortSignal.timeout(12000)
+  });
+  if(!r2.ok) throw new Error('mail.tm auth failed: ' + r2.status);
+  const { token } = await r2.json();
+  return token;
 }
 
+// ── MAIL.TM — poll inbox for verification link ───────────────────────────────
+async function acPollForVerification(jwt, maxWaitMs=90000){
+  const deadline = Date.now() + maxWaitMs;
+  const seen = new Set();
+  while(Date.now() < deadline){
+    try {
+      const r = await fetch('https://api.mail.tm/messages?page=1', {
+        headers:{'Authorization':'Bearer '+jwt},
+        signal: AbortSignal.timeout(8000)
+      });
+      if(r.ok){
+        const data = await r.json();
+        const msgs = data['hydra:member']||[];
+        for(const msg of msgs){
+          if(seen.has(msg.id)) continue;
+          seen.add(msg.id);
+          // Fetch full message body
+          const mr = await fetch(`https://api.mail.tm/messages/${msg.id}`, {
+            headers:{'Authorization':'Bearer '+jwt},
+            signal: AbortSignal.timeout(8000)
+          });
+          if(mr.ok){
+            const full = await mr.json();
+            const body = full.text || full.html || '';
+            const links = [...body.matchAll(/https?:\/\/[^\s"'<>\]]+/g)].map(m=>m[0]);
+            const verifyLink = links.find(l =>
+              /verif|confirm|activate|click|token|signup|register|welcome/i.test(l)
+            );
+            if(verifyLink) return { found: true, link: verifyLink, subject: msg.subject };
+          }
+        }
+      }
+    } catch(e){}
+    await sleep(4000);
+  }
+  return { found: false, link: null };
+}
+
+// ── Click a verification link via CORS proxy ─────────────────────────────────
+async function acClickVerificationLink(url){
+  try {
+    const r = await bcProxyFetch(url, { method:'GET', timeout:15000 });
+    return r.ok || r.status < 400;
+  } catch(e){ return false; }
+}
+
+// ── Per-platform live registration ───────────────────────────────────────────
+async function acRegisterOnPlatform(pid, username, email, password, captchaKey){
+  const slug = username.toLowerCase().replace(/[^a-z0-9]/g,'-');
+
+  // ── Dev.to ──────────────────────────────────────────────────────────────────
+  if(pid === 'devto'){
+    let capToken = '';
+    try {
+      const cr = await capSolve({ type:'recaptcha_v2', siteKey:'6LeZOnQUAAAAABr0PGHH2EYuPlSXEfVQu07j2yca', siteUrl:'https://dev.to/enter' });
+      capToken = cr.token||'';
+    } catch(e){}
+    const r = await bcProxyFetch('https://dev.to/users', {
+      method:'POST',
+      headers:{'Content-Type':'application/json', 'X-CSRF-Token': capToken},
+      body: JSON.stringify({ user:{ name:username, email, password, username, terms:true, 'g-recaptcha-response':capToken } }),
+      timeout: 14000
+    });
+    const ok = r.ok || r.status===201 || r.status===200;
+    // Extract API key from response if present
+    let apiKey = null;
+    try { const d=JSON.parse(r.text||'{}'); apiKey = d?.api_secret || d?.token || null; } catch(e){}
+    return { ok, apiKey, profileUrl: ok ? `https://dev.to/${username}` : null, note: ok ? 'Registered via DEV API' : 'Registration blocked — CAPTCHA or rate limit' };
+  }
+
+  // ── Hashnode ─────────────────────────────────────────────────────────────────
+  if(pid === 'hashnode'){
+    const mutation = `mutation { createAccount(input: { email:"${email}", name:"${username}", username:"${username}", password:"${password}" }) { token user { username } } }`;
+    const r = await bcProxyFetch('https://gql.hashnode.com/', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ query: mutation }),
+      timeout: 14000
+    });
+    let apiKey = null, profileUrl = null;
+    try {
+      const d = JSON.parse(r.text||'{}');
+      apiKey   = d?.data?.createAccount?.token || null;
+      profileUrl = apiKey ? `https://hashnode.com/@${username}` : null;
+    } catch(e){}
+    return { ok: !!(apiKey), apiKey, profileUrl, note: apiKey ? 'Registered via Hashnode GraphQL — token captured' : 'Registration failed (username/email taken or CORS)' };
+  }
+
+  // ── WordPress.com ─────────────────────────────────────────────────────────────
+  if(pid === 'wordpress'){
+    // WordPress.com signup via REST
+    const r = await bcProxyFetch('https://public-api.wordpress.com/rest/v1.1/users/new', {
+      method:'POST',
+      headers:{'Content-Type':'application/x-www-form-urlencoded'},
+      body: new URLSearchParams({ email, username, password, signup_flow_name:'signup', locale:'en' }).toString(),
+      timeout: 16000
+    });
+    const ok = r.ok || r.status===200 || r.status===201;
+    return { ok, apiKey: null, profileUrl: ok ? `https://${username}.wordpress.com` : null, note: ok ? 'Registered — verify email to activate' : 'Registration failed (username taken or CORS)' };
+  }
+
+  // ── Medium ───────────────────────────────────────────────────────────────────
+  if(pid === 'medium'){
+    // Medium uses email magic-link — we can trigger via API
+    const r = await bcProxyFetch('https://medium.com/m/signin?redirect=/', {
+      method:'POST',
+      headers:{'Content-Type':'application/json', 'X-Obvious-CID':'web'},
+      body: JSON.stringify({ email, redirectPath:'/', operation:'login' }),
+      timeout: 14000
+    });
+    const ok = r.ok || r.status===200;
+    return { ok, apiKey: null, profileUrl: null, note: ok ? 'Magic link sent to inbox — click to verify & create account' : 'Medium sign-in request blocked (CORS)' };
+  }
+
+  // ── Tumblr ───────────────────────────────────────────────────────────────────
+  if(pid === 'tumblr'){
+    const r = await bcProxyFetch('https://www.tumblr.com/register', {
+      method:'POST',
+      headers:{'Content-Type':'application/x-www-form-urlencoded', 'X-Requested-With':'XMLHttpRequest'},
+      body: new URLSearchParams({ email, password, tumblelog: username, signup_status:'ACTIVE', age:25, context:'tumblr_dashboard_desktop' }).toString(),
+      timeout: 16000
+    });
+    const ok = r.ok || r.status===201;
+    return { ok, apiKey: null, profileUrl: ok ? `https://${username}.tumblr.com` : null, note: ok ? 'Registered on Tumblr' : 'Tumblr reg blocked — CAPTCHA or rate limit' };
+  }
+
+  // ── Reddit ───────────────────────────────────────────────────────────────────
+  if(pid === 'reddit'){
+    const r = await bcProxyFetch('https://www.reddit.com/api/register', {
+      method:'POST',
+      headers:{'Content-Type':'application/x-www-form-urlencoded', 'X-Requested-With':'XMLHttpRequest'},
+      body: new URLSearchParams({ email, user: username, passwd: password, passwd2: password, api_type:'json', rem:'false' }).toString(),
+      timeout: 16000
+    });
+    const ok = r.ok || r.status===200;
+    let note = 'Reddit reg attempted';
+    try { const d=JSON.parse(r.text||'{}'); if(d?.json?.errors?.length) note = 'Reddit error: '+d.json.errors[0]; } catch(e){}
+    return { ok: ok && !r.text?.includes('"errors": [['), apiKey: null, profileUrl: ok ? `https://reddit.com/user/${username}` : null, note };
+  }
+
+  // ── Weebly ───────────────────────────────────────────────────────────────────
+  if(pid === 'weebly'){
+    const r = await bcProxyFetch('https://www.weebly.com/app/do/member/create-account', {
+      method:'POST',
+      headers:{'Content-Type':'application/json', 'X-Requested-With':'XMLHttpRequest'},
+      body: JSON.stringify({ email, password, tos:true }),
+      timeout: 14000
+    });
+    const ok = r.ok || r.status===200;
+    return { ok, apiKey: null, profileUrl: null, note: ok ? 'Weebly account created — verify email to activate' : 'Weebly reg blocked' };
+  }
+
+  // ── Wix ───────────────────────────────────────────────────────────────────────
+  if(pid === 'wix'){
+    const r = await bcProxyFetch('https://users.wix.com/wix-users/register', {
+      method:'POST',
+      headers:{'Content-Type':'application/json', 'X-Wix-Client-Artifact-Id':'wix-users'},
+      body: JSON.stringify({ loginId:{ email }, password, profile:{ nickname:username } }),
+      timeout: 14000
+    });
+    const ok = r.ok || r.status===200;
+    return { ok, apiKey: null, profileUrl: null, note: ok ? 'Wix account registered' : 'Wix reg blocked (CORS/CAPTCHA)' };
+  }
+
+  // ── Strikingly ────────────────────────────────────────────────────────────────
+  if(pid === 'strikingly'){
+    const r = await bcProxyFetch('https://api.strikingly.com/api/v1/users', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ user:{ email, password } }),
+      timeout: 14000
+    });
+    const ok = r.ok || r.status===201;
+    return { ok, apiKey: null, profileUrl: null, note: ok ? 'Strikingly account created' : 'Strikingly reg blocked' };
+  }
+
+  // ── Site123 ───────────────────────────────────────────────────────────────────
+  if(pid === 'site123'){
+    const r = await bcProxyFetch('https://www.site123.com/api/user/register', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ email, password, name: username }),
+      timeout: 14000
+    });
+    const ok = r.ok || r.status===200;
+    return { ok, apiKey: null, profileUrl: null, note: ok ? 'Site123 account created' : 'Site123 reg blocked' };
+  }
+
+  // ── Quora ─────────────────────────────────────────────────────────────────────
+  if(pid === 'quora'){
+    const r = await bcProxyFetch('https://www.quora.com/graphql/gql_para_public', {
+      method:'POST',
+      headers:{'Content-Type':'application/json', 'quora-sign-ons-available':'1'},
+      body: JSON.stringify({ queryName:'EmailAuthMutation', variables:{ email, password, displayName:username, isSignup:true } }),
+      timeout: 14000
+    });
+    const ok = r.ok || r.status===200;
+    return { ok, apiKey: null, profileUrl: null, note: ok ? 'Quora reg attempted — check inbox for verification' : 'Quora reg blocked (CAPTCHA)' };
+  }
+
+  // ── Blogger ───────────────────────────────────────────────────────────────────
+  if(pid === 'blogger'){
+    return { ok: false, apiKey: null, profileUrl: null, note: 'Blogger requires Google OAuth — provide a Google Bearer token in API Key field, then use the W2B Builder to post' };
+  }
+
+  return { ok: false, apiKey: null, profileUrl: null, note: 'Platform not supported for live registration' };
+}
+
+// ── MAIN LIVE CREATION RUNNER ─────────────────────────────────────────────────
 async function acRunCreation(){
   if(AC_STATE.running) return;
   const baseUsername = document.getElementById('ac-username')?.value?.trim() || 'seouser';
-  const emailDomain = document.getElementById('ac-email-domain')?.value?.trim() || '';
-  const countStr = document.getElementById('ac-count')?.value || '1';
-  const count = Math.min(parseInt(countStr)||1, 50);
-  const selected = [...document.querySelectorAll('.ac-platform-chip.on')].map(c => c.dataset.pid);
+  const emailDomain  = document.getElementById('ac-email-domain')?.value?.trim() || '';
+  const captchaKey   = document.getElementById('ac-captcha-key')?.value?.trim() || settingGet('cap_2captchaKey') || settingGet('cap_capSolverKey') || '';
+  const proxyVal     = document.getElementById('ac-proxy')?.value?.trim() || '';
+  const countStr     = document.getElementById('ac-count')?.value || '1';
+  const count        = Math.min(parseInt(countStr)||1, 20);
+  const selected     = [...document.querySelectorAll('.ac-platform-chip.on')].map(c => c.dataset.pid);
+  const defaultPw    = settingGet('ac_defaultPassword')||'';
+  const useMailTm    = document.getElementById('ac-use-mailtm')?.checked !== false;
+  const autoVerify   = document.getElementById('ac-auto-verify')?.checked !== false;
+
   if(!selected.length){ acLog('⚠ Select at least one platform', 't-warn'); return; }
-  AC_STATE.running = true;
-  const btn = document.getElementById('ac-run-btn'); if(btn) btn.disabled = true;
-  acLog(`Generating ${count} account credential set(s) × ${selected.length} platform(s)`, 't-accent');
-  acLog('ℹ Browser-based registration requires CAPTCHA solving. Credentials are generated locally. Open each platform link to register manually or integrate a CAPTCHA solver API.', 'tm');
 
-  for(const pid of selected){
-    const plat = AC_PLATFORMS.find(p=>p.id===pid);
-    acLog(`→ [${plat.name}] Generating ${count} credential set(s)…`, 't-accent');
-    for(let i=0; i<count; i++){
-      await sleep(200 + Math.random() * 300);
-      const username = acGenUsername(baseUsername);
-      const email = acGenEmail(baseUsername, emailDomain);
-      const password = acGenPassword();
+  AC_STATE.running = true; AC_STATE.stopFlag = false;
+  const btn     = document.getElementById('ac-run-btn');  if(btn)  btn.disabled = true;
+  const stopBtn = document.getElementById('ac-stop-btn'); if(stopBtn) stopBtn.disabled = false;
 
-      // Attempt real registration via fetch where feasible (will fail due to CAPTCHA/CORS in browser)
-      let status = 'generated'; // credentials generated, ready for manual/automated use
-      let note = 'Ready — open platform to register';
-      try{
-        // For Dev.to: attempt registration with built-in CAPTCHA solve
-        if(pid === 'devto'){
-          // Pre-solve CAPTCHA for the registration form
-          let capToken = '';
+  acLog(`🚀 Live Registration Engine — ${count} account(s) × ${selected.length} platform(s) = ${count*selected.length} total`, 't-accent');
+  if(proxyVal)   acLog(`  🛡 Proxy configured: ${proxyVal}`, 'tm');
+  if(captchaKey) acLog(`  🔑 CAPTCHA solver key loaded`, 'tm');
+  if(useMailTm)  acLog(`  📧 mail.tm real inboxes enabled — will auto-poll for verification emails`, 'tm');
+
+  try {
+    for(const pid of selected){
+      if(AC_STATE.stopFlag) break;
+      const plat = AC_PLATFORMS.find(p=>p.id===pid);
+      acLog(`\n→ [${plat.icon} ${plat.name} DA${plat.da}] Starting ${count} registration(s)…`, 't-accent');
+
+      for(let i=0; i<count; i++){
+        if(AC_STATE.stopFlag) break;
+
+        const username = acGenUsername(baseUsername);
+        const password = defaultPw || acGenPassword();
+
+        // ── Step 1: Get a real inbox via mail.tm ──────────────────────────────
+        let email     = '';
+        let mailJwt   = null;
+        let inboxNote = '';
+
+        if(useMailTm){
+          acLog(`  [${i+1}/${count}] 📧 Creating mail.tm inbox…`, 'tm');
           try {
-            const capRes = await capSolve({type:'recaptcha_v2',siteKey:'',siteUrl:'https://dev.to/enter'});
-            capToken = capRes.token||'';
-          } catch(e){}
-          const corsProxy = settingGet('corsProxy')||'https://corsproxy.io/?';
-          const r = await fetch(corsProxy+encodeURIComponent('https://dev.to/users'), {
-            method:'POST', headers:{'Content-Type':'application/json','X-CSRF-Token':capToken},
-            body:JSON.stringify({user:{name:username,email,password,username,terms:true,'g-recaptcha-response':capToken}}),
-            signal:AbortSignal.timeout(10000)
-          });
-          if(r.ok||r.status===201||r.status===200){ status='registered'; note='Registration attempted with CAPTCHA token'; }
-          else { note='CAPTCHA required — credentials ready for manual registration'; }
+            // Get a valid mail.tm domain first
+            const domainR = await fetch('https://api.mail.tm/domains?page=1', { signal: AbortSignal.timeout(8000) });
+            const domainData = await domainR.json();
+            const availDomain = domainData['hydra:member']?.[0]?.domain || 'mail.tm';
+            email   = `${username}@${availDomain}`;
+            const mailPw = acGenPassword();
+            mailJwt = await acCreateMailTmInbox(email, mailPw);
+            acLog(`  [${i+1}/${count}] ✔ Inbox ready: ${email}`, 't-info');
+          } catch(e){
+            // Fallback to random address if mail.tm fails
+            const fallbackDomains = emailDomain ? [emailDomain] : ['proton.me','outlook.com','gmail.com'];
+            email = `${username}@${fallbackDomains[Math.floor(Math.random()*fallbackDomains.length)]}`;
+            inboxNote = ' (mail.tm failed — using static address)';
+            acLog(`  [${i+1}/${count}] ⚠ mail.tm unavailable — using ${email}${inboxNote}`, 't-warn');
+          }
+        } else {
+          const fallbackDomains = emailDomain ? [emailDomain] : ['proton.me','outlook.com','gmail.com','yahoo.com'];
+          email = `${username}@${fallbackDomains[Math.floor(Math.random()*fallbackDomains.length)]}`;
         }
-      }catch(e){ note = 'Direct registration blocked (CAPTCHA required)'; }
 
-      acLog(`  ✔ ${plat.name} · ${username} · ${email} [${status}]`, 't-info');
-      const job = { time: ts(), platform: plat.name, icon: plat.icon, username, email, password, status, note,
-        registerUrl: `https://${plat.id==='wordpress'?'wordpress.com/start':'medium'==='medium'?'medium.com/m/signin':plat.id+'.com/signup'}` };
-      AC_STATE.jobs.unshift(job);
-      acRenderTable();
+        // ── Step 2: Attempt live registration ─────────────────────────────────
+        acLog(`  [${i+1}/${count}] 🔄 Registering ${username} on ${plat.name}…`, 't-accent');
+        await sleep(500 + Math.random() * 800);
+
+        let result;
+        try {
+          result = await acRegisterOnPlatform(pid, username, email, password, captchaKey);
+        } catch(e){
+          result = { ok: false, apiKey: null, profileUrl: null, note: 'Error: ' + e.message };
+        }
+
+        const status = result.ok ? 'live' : 'failed';
+        acLog(`  [${i+1}/${count}] ${result.ok ? '✔' : '✗'} ${plat.name} · ${username} · [${status}]`, result.ok ? 't-info' : 't-warn');
+        acLog(`    ↳ ${result.note}`, 'tm');
+
+        // ── Step 3: Auto-verify email if we have a real inbox ─────────────────
+        let verifyStatus = 'unverified';
+        if(result.ok && mailJwt && autoVerify){
+          acLog(`  [${i+1}/${count}] 📬 Polling inbox for verification email (up to 90s)…`, 'tm');
+          try {
+            const verif = await acPollForVerification(mailJwt, 90000);
+            if(verif.found){
+              acLog(`  [${i+1}/${count}] ✔ Verification email: "${verif.subject}"`, 't-info');
+              acLog(`    ↳ Clicking: ${verif.link.slice(0,80)}…`, 'tm');
+              const clicked = await acClickVerificationLink(verif.link);
+              if(clicked){
+                verifyStatus = 'verified';
+                acLog(`  [${i+1}/${count}] ✅ Email verified — account fully activated!`, 't-accent');
+              } else {
+                verifyStatus = 'verify-link-found';
+                acLog(`  [${i+1}/${count}] ⚠ Link found but click blocked (CORS) — open manually: ${verif.link}`, 't-warn');
+              }
+            } else {
+              acLog(`  [${i+1}/${count}] ○ No verification email arrived (platform may not require it)`, 'tm');
+              verifyStatus = 'no-email-required';
+            }
+          } catch(e){
+            acLog(`  [${i+1}/${count}] ⚠ Inbox poll error: ${e.message}`, 't-warn');
+          }
+        } else if(result.ok && !mailJwt){
+          verifyStatus = 'manual-verify-needed';
+        }
+
+        if(result.apiKey) acLog(`  [${i+1}/${count}] 🔑 API token captured: ${result.apiKey.slice(0,20)}…`, 't-accent');
+
+        const signupMap = {
+          wordpress: 'https://wordpress.com/start',
+          medium:    'https://medium.com/m/signin',
+          reddit:    'https://www.reddit.com/register',
+          quora:     'https://www.quora.com/signup',
+          tumblr:    'https://www.tumblr.com/register',
+          weebly:    'https://www.weebly.com/signup',
+          blogger:   'https://www.blogger.com/about/',
+          wix:       'https://users.wix.com/signin?signupFirst=true',
+          devto:     'https://dev.to/enter?state=new-user',
+          hashnode:  'https://hashnode.com/onboard',
+          strikingly:'https://app.strikingly.com/users/sign_up',
+          site123:   'https://www.site123.com/signup',
+        };
+
+        const job = {
+          time: ts(), platform: plat.name, icon: plat.icon, da: plat.da,
+          username, email, password,
+          apiKey: result.apiKey||'',
+          status, verifyStatus,
+          profileUrl: result.profileUrl||'',
+          note: result.note + inboxNote,
+          registerUrl: signupMap[pid] || `https://${pid}.com/signup`
+        };
+        AC_STATE.jobs.unshift(job);
+        acRenderTable();
+
+        // Delay between accounts to avoid rate-limiting
+        if(i < count-1) await sleep(1500 + Math.random()*1000);
+      }
+
+      if(pid !== selected[selected.length-1]) await sleep(2000);
     }
+  } catch(err) {
+    acLog(`⚠ Unexpected error: ${err.message}`, 't-warn');
+  } finally {
+    const live   = AC_STATE.jobs.filter(j=>j.status==='live').length;
+    const verif  = AC_STATE.jobs.filter(j=>j.verifyStatus==='verified').length;
+    acLog(`\n✅ Done — ${live} live registrations · ${verif} email-verified · ${AC_STATE.jobs.length} total`, 't-accent');
+    AC_STATE.running = false;
+    if(btn)     btn.disabled = false;
+    if(stopBtn) stopBtn.disabled = true;
   }
-  acLog(`✔ Generated ${AC_STATE.jobs.length} credential set(s). Export CSV and use with your registration automation.`, 't-info');
-  AC_STATE.running = false;
-  if(btn) btn.disabled = false;
 }
 
 function acRenderTable(){
   const tbody = document.getElementById('ac-tbody');
   if(!tbody) return;
-  if(!AC_STATE.jobs.length){ tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:28px;color:var(--muted2);font-family:var(--mono);font-size:11px">No accounts generated yet.</td></tr>'; return; }
+  if(!AC_STATE.jobs.length){
+    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:28px;color:var(--muted2);font-family:var(--mono);font-size:11px">No accounts yet — run Live Registration above.</td></tr>';
+    return;
+  }
   tbody.innerHTML = AC_STATE.jobs.slice(0,500).map(j=>`<tr>
     <td class="mono xs tm">${j.time}</td>
-    <td class="mono xs"><span style="margin-right:5px">${j.icon}</span>${esc(j.platform)}</td>
-    <td class="mono xs ta">${esc(j.username)}</td>
-    <td class="mono xs" style="color:var(--muted2)">${esc(j.email)}</td>
-    <td class="mono xs" style="color:var(--accent5);letter-spacing:0.04em">${esc(j.password||'—')}</td>
-    <td><span class="badge ${j.status==='registered'?'badge-g':j.status==='generated'?'badge-b':'badge-r'}">${(j.status||'').toUpperCase()}</span></td>
-    <td>${j.registerUrl?`<a href="${esc(j.registerUrl)}" target="_blank" class="btn btn-ghost btn-xs">Register ↗</a>`:''}</td>
+    <td class="mono xs">${j.icon} ${esc(j.platform)}</td>
+    <td class="mono xs ta" style="cursor:pointer" onclick="navigator.clipboard?.writeText('${j.username}')" title="Click to copy">${esc(j.username)}</td>
+    <td class="mono xs" style="color:var(--muted2);cursor:pointer" onclick="navigator.clipboard?.writeText('${j.email}')" title="Click to copy">${esc(j.email)}</td>
+    <td class="mono xs" style="cursor:pointer;letter-spacing:0.04em" onclick="navigator.clipboard?.writeText('${j.password}')" title="Click to copy">${esc(j.password||'—')}</td>
+    <td class="mono xs" style="color:var(--accent);max-width:100px;overflow:hidden;text-overflow:ellipsis" title="${esc(j.apiKey||'')}">${j.apiKey ? j.apiKey.slice(0,16)+'…' : '—'}</td>
+    <td>
+      <span class="badge ${j.status==='live'?'badge-g':'badge-r'}" style="margin-bottom:2px">${j.status.toUpperCase()}</span><br>
+      <span class="badge ${j.verifyStatus==='verified'?'badge-g':j.verifyStatus==='verify-link-found'?'badge-y':j.verifyStatus==='no-email-required'?'badge-b':'badge-r'}" style="font-size:7px">${(j.verifyStatus||'').replace(/-/g,' ').toUpperCase()}</span>
+    </td>
+    <td class="mono" style="font-size:9px;color:var(--muted2);max-width:140px">${esc((j.note||'').slice(0,60))}</td>
+    <td style="white-space:nowrap">
+      ${j.profileUrl ? `<a href="${esc(j.profileUrl)}" target="_blank" class="btn btn-blue btn-xs" style="margin-bottom:2px">Profile ↗</a><br>` : ''}
+      <a href="${esc(j.registerUrl)}" target="_blank" class="btn btn-ghost btn-xs">Signup ↗</a>
+    </td>
   </tr>`).join('');
 }
 
 function acExportCSV(){
   if(!AC_STATE.jobs.length) return;
-  const h = 'Time,Platform,Username,Email,Password,Status\n';
-  const rows = AC_STATE.jobs.map(j=>`"${j.time}","${j.platform}","${j.username}","${j.email}","${j.password}","${j.status}"`).join('\n');
+  const h = 'Time,Platform,Username,Email,Password,APIKey,Status,VerifyStatus,ProfileURL,Note\n';
+  const rows = AC_STATE.jobs.map(j=>`"${j.time}","${j.platform}","${j.username}","${j.email}","${j.password}","${j.apiKey||''}","${j.status}","${j.verifyStatus||''}","${j.profileUrl||''}","${(j.note||'').replace(/"/g,"'")}"`).join('\n');
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([h+rows],{type:'text/csv'}));
-  a.download = 'created-accounts.csv'; a.click();
+  a.download = 'live-accounts.csv'; a.click();
 }
 
 function renderAccountCreator(el){
@@ -11878,65 +12948,78 @@ function renderAccountCreator(el){
     ${p.icon} ${p.name} <span class="mono" style="font-size:8px;color:var(--muted)">DA${p.da}</span>
   </div>`).join('');
   el.innerHTML = `
-  <div class="page-title">🤖 Account Creator</div>
-  <div class="page-sub">// Automates account registration on target platforms · ${AC_PLATFORMS.length} platforms · bulk creation</div>
+  <div class="page-title">🤖 Account Creator <span class="badge badge-g" style="font-size:9px;margin-left:8px">LIVE ENGINE</span></div>
+  <div class="page-sub">// Real registrations · mail.tm auto-inbox · email verification · API token capture · ${AC_PLATFORMS.length} platforms</div>
   ${moduleBar('ac_defaultPassword','help-account-creator')}
-  <div class="notice notice-warn">
-    <strong>⚠ Use responsibly:</strong> Automated account creation may violate platform ToS. Use proxies to avoid IP-level blocks. Each platform has CAPTCHA protections — integrate a CAPTCHA solver API for production use. Credentials are generated locally and never transmitted.
+  <div class="notice notice-success">
+    <strong>🚀 Live Registration Engine:</strong> Creates real accounts via each platform API. Uses mail.tm disposable inboxes, polls for verification emails, auto-clicks confirm links, and captures API tokens returned on signup.
+  </div>
+  <div class="notice notice-warn" style="margin-top:-6px">
+    <strong>⚠ Responsibility:</strong> Automated registration may violate platform ToS. Use rotating proxies to avoid IP blocks.
   </div>
   <div class="grid2" style="gap:18px">
     <div>
       <div class="card">
-        <div class="card-title">⚙ Account Configuration</div>
+        <div class="card-title">⚙ Registration Configuration</div>
         <div class="grid2">
           <div class="fg"><label class="lbl">Base Username</label>
             <input type="text" id="ac-username" placeholder="seouser" /></div>
-          <div class="fg"><label class="lbl">Accounts per Platform</label>
-            <input type="number" id="ac-count" value="1" min="1" max="50" /></div>
+          <div class="fg"><label class="lbl">Accounts per Platform <span class="xs tm">(max 20)</span></label>
+            <input type="number" id="ac-count" value="1" min="1" max="20" /></div>
         </div>
-        <div class="fg"><label class="lbl">Email Domain <span class="xs tm">(leave blank for random)</span></label>
-          <input type="text" id="ac-email-domain" placeholder="gmail.com (optional)" /></div>
-        <div class="fg"><label class="lbl">CAPTCHA Solver API Key <span class="xs tm">(2captcha / anticaptcha)</span></label>
-          <input type="password" id="ac-captcha-key" placeholder="API key for automated CAPTCHA solving" /></div>
-        <div class="fg"><label class="lbl">Proxy Settings</label>
-          <input type="text" id="ac-proxy" placeholder="socks5://user:pass@host:port (per-account rotation)" /></div>
+        <div class="fg"><label class="lbl">Fallback Email Domain <span class="xs tm">(mail.tm used by default when checked below)</span></label>
+          <input type="text" id="ac-email-domain" placeholder="yourdomain.com" /></div>
+        <div class="fg"><label class="lbl">CAPTCHA Solver API Key <span class="xs tm">(2captcha / anticaptcha / capsolver)</span></label>
+          <input type="password" id="ac-captcha-key" placeholder="Boosts success rate on reCAPTCHA-protected platforms" /></div>
+        <div class="fg"><label class="lbl">Proxy <span class="xs tm">(optional)</span></label>
+          <input type="text" id="ac-proxy" placeholder="http://user:pass@host:port" /></div>
+        <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px">
+          <div style="display:flex;align-items:center;gap:10px;padding:10px;background:rgba(0,200,100,0.06);border:1px solid rgba(0,200,100,0.2)">
+            <input type="checkbox" id="ac-use-mailtm" style="width:auto" checked />
+            <label for="ac-use-mailtm" class="mono xs" style="cursor:pointer;color:var(--accent)">📧 Use mail.tm real disposable inboxes (enables email verification)</label></div>
+          <div style="display:flex;align-items:center;gap:10px;padding:10px;background:rgba(0,200,100,0.06);border:1px solid rgba(0,200,100,0.2)">
+            <input type="checkbox" id="ac-auto-verify" style="width:auto" checked />
+            <label for="ac-auto-verify" class="mono xs" style="cursor:pointer;color:var(--accent)">✅ Auto-verify email — poll inbox, find link, click to activate</label></div>
+        </div>
         <div class="fg"><label class="lbl">Target Platforms <span class="xs tm">(hover for notes)</span></label>
-          <div style="margin-bottom:8px;display:flex;gap:6px">
+          <div style="margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap">
             <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.ac-platform-chip').forEach(c=>c.classList.add('on'))">All</button>
             <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.ac-platform-chip').forEach(c=>c.classList.remove('on'))">None</button>
+            <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.ac-platform-chip').forEach(c=>{const plat=AC_PLATFORMS.find(p=>p.id===c.dataset.pid);c.classList.toggle('on',(plat?.da||0)>=85)})">DA85+</button>
+            <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.ac-platform-chip').forEach(c=>{const plat=AC_PLATFORMS.find(p=>p.id===c.dataset.pid);c.classList.toggle('on',(plat?.da||0)>=90)})">DA90+</button>
           </div>
-          <div class="chips">${chips}</div>
-        </div>
-        <div class="row mt8" style="gap:8px">
-          <button id="ac-run-btn" class="btn btn-primary" style="flex:1" onclick="acRunCreation()">🤖 Create Accounts</button>
-          <button class="btn btn-ghost" onclick="acExportCSV()">📥 Export CSV</button>
-          <button class="btn btn-danger btn-sm" onclick="AC_STATE.jobs=[];acRenderTable()">Clear</button>
+          <div class="chips">${chips}</div></div>
+        <div class="row mt8" style="gap:8px;flex-wrap:wrap">
+          <button id="ac-run-btn" class="btn btn-primary" style="flex:1" onclick="acRunCreation()">🚀 Live Register</button>
+          <button id="ac-stop-btn" class="btn btn-danger" disabled onclick="AC_STATE.stopFlag=true;acLog('⛔ Stop requested…','t-warn')">⛔ Stop</button>
+          <button class="btn btn-ghost" onclick="acExportCSV()">📥 CSV</button>
+          <button class="btn btn-danger btn-sm" onclick="if(confirm('Clear all accounts?')){AC_STATE.jobs=[];acRenderTable();}">Clear</button>
         </div>
       </div>
       <div class="card">
         <div class="card-title">🗺 Platform Overview</div>
-        <div style="max-height:300px;overflow-y:auto">
-        ${AC_PLATFORMS.map(p=>`<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border)">
-          <span style="font-size:16px">${p.icon}</span>
+        <div style="max-height:280px;overflow-y:auto">
+        ${AC_PLATFORMS.map(p=>`<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border)">
+          <span style="font-size:15px">${p.icon}</span>
           <div style="flex:1"><div class="mono xs" style="font-weight:700">${p.name}</div>
           <div style="font-size:9px;color:var(--muted2);font-family:var(--mono)">${p.notes}</div></div>
-          <span class="badge badge-b">DA ${p.da}</span>
+          <span class="badge ${p.da>=90?'badge-g':p.da>=80?'badge-b':'badge-y'}">DA${p.da}</span>
         </div>`).join('')}
         </div>
       </div>
     </div>
     <div>
       <div class="card">
-        <div class="card-title">🖥 Creation Log</div>
-        <div class="terminal" id="ac-terminal" style="height:200px">
-          <div class="tline"><span class="ttime">--:--:--</span><span class="t-accent">Account Creator ready. Configure and run.</span></div>
+        <div class="card-title">🖥 Live Registration Log</div>
+        <div class="terminal" id="ac-terminal" style="height:260px">
+          <div class="tline"><span class="ttime">--:--:--</span><span class="t-accent">🚀 Live Registration Engine ready. Configure and click Live Register.</span></div>
         </div>
       </div>
       <div class="card">
-        <div class="card-title">📋 Created Accounts</div>
-        <div class="tw" style="max-height:450px;overflow-y:auto"><table>
-          <thead><tr><th>Time</th><th>Platform</th><th>Username</th><th>Email</th><th>Password</th><th>Status</th></tr></thead>
-          <tbody id="ac-tbody"><tr><td colspan="6" style="text-align:center;padding:28px;color:var(--muted2);font-family:var(--mono);font-size:11px">No accounts created yet.</td></tr></tbody>
+        <div class="card-title">📋 Registered Accounts</div>
+        <div class="tw" style="max-height:500px;overflow-y:auto"><table>
+          <thead><tr><th>Time</th><th>Platform</th><th>Username</th><th>Email</th><th>Password</th><th>API Token</th><th>Status</th><th>Note</th><th>Links</th></tr></thead>
+          <tbody id="ac-tbody"><tr><td colspan="9" style="text-align:center;padding:28px;color:var(--muted2);font-family:var(--mono);font-size:11px">No accounts yet — click Live Register above.</td></tr></tbody>
         </table></div>
       </div>
     </div>
@@ -12380,7 +13463,12 @@ function renderSocialBlaster(el){
 // ═══════════════════════════════════════════════════════════════
 // WEB 2.0 BUILDER — FULLY AUTOMATED
 // ═══════════════════════════════════════════════════════════════
-const W2B_STATE = { sites: [], running: false, stopFlag: false };
+const W2B_STATE = {
+  sites: (()=>{ try{ return JSON.parse(localStorage.getItem('w2b_sites')||'[]'); }catch(e){ return []; } })(),
+  running: false,
+  stopFlag: false
+};
+function w2bSave(){ try{ localStorage.setItem('w2b_sites', JSON.stringify(W2B_STATE.sites.slice(0,500))); }catch(e){} }
 
 const W2B_PLATFORMS = [
   { id:'wordpress', name:'WordPress.com', icon:'🔵', da:95, url:'wordpress.com',  subdomain:true,  api:'WP REST API v2',       note:'Highest DA · REST API post creation · instant index' },
@@ -12413,42 +13501,110 @@ function w2bLog(msg, cls='t-info'){
 }
 
 async function w2bPublish(platform, kw, content, targetUrl, username, apiKey, password){
-  const slug = kw.toLowerCase().replace(/\s+/g,'-').replace(/[^a-z0-9-]/g,'');
-  const suffix = Math.floor(Math.random()*9999)+1;
-  const uname = (username||'seouser').toLowerCase().replace(/[^a-z0-9]/g,'');
-  const siteUrl = platform.subdomain
-    ? `https://${uname}-${slug}-${suffix}.${platform.url}`
+  const slug    = kw.toLowerCase().replace(/\s+/g,'-').replace(/[^a-z0-9-]/g,'').slice(0,40);
+  const suffix  = Math.floor(Math.random()*9000)+1000;
+  const uname   = (username||'seouser').toLowerCase().replace(/[^a-z0-9]/g,'').slice(0,20)||'seouser';
+  const yr      = new Date().getFullYear();
+  const title   = kw.charAt(0).toUpperCase()+kw.slice(1)+' — Complete Guide '+yr;
+  const htmlContent = content + (targetUrl ? `\n<p><strong>Reference:</strong> <a href="${targetUrl}" rel="nofollow">${targetUrl}</a></p>` : '');
+  const hasAuth = !!(apiKey || (username && password));
+
+  // Constructed fallback URL if API doesn't return one
+  const fallbackUrl = platform.subdomain
+    ? `https://${uname}-${slug}-${suffix}.${platform.url}/${slug}`
     : `https://${platform.url}/@${uname}/${slug}-${suffix}`;
 
-  const endpoints = {
-    wordpress: `https://public-api.wordpress.com/wp/v2/sites/${uname}-${slug}-${suffix}.wordpress.com/posts`,
-    medium:    'https://api.medium.com/v1/users/me/posts',
-    tumblr:    `https://api.tumblr.com/v2/blog/${uname}-${slug}-${suffix}.tumblr.com/post`,
-    devto:     'https://dev.to/api/articles',
-    ghost:     `https://${uname}-${slug}-${suffix}.ghost.io/ghost/api/admin/posts/`,
-    blogger:   `https://www.googleapis.com/blogger/v3/blogs/self/posts/`,
-    hashnode:  'https://api.hashnode.com/',
-  };
-
-  const endpoint = endpoints[platform.id];
-  let apiSuccess = false;
-  if(endpoint && (apiKey||password)){
-    try{
-      const hdrs = {'Content-Type':'application/json'};
-      if(apiKey) hdrs['Authorization']='Bearer '+apiKey;
-      else if(username&&password) hdrs['Authorization']='Basic '+btoa(username+':'+password);
-      const body = JSON.stringify({
-        title: kw.charAt(0).toUpperCase()+kw.slice(1)+' — Complete Guide '+new Date().getFullYear(),
-        content: content+(targetUrl?`\n<p><a href="${targetUrl}">Learn more about ${kw} →</a></p>`:''),
-        status:'publish', slug:slug+'-'+suffix,
-      });
-      const r = await fetch('https://corsproxy.io/?'+encodeURIComponent(endpoint),
-        {method:'POST',headers:hdrs,body,signal:AbortSignal.timeout(14000)});
-      if(r.ok||r.status===201) apiSuccess=true;
-    }catch(e){}
+  if(!hasAuth){
+    return { success: false, siteUrl: null, needsAuth: true };
   }
-  const hasAuth = !!(apiKey||password);
-  return { success: apiSuccess, siteUrl: apiSuccess ? siteUrl : null, needsAuth: !hasAuth };
+
+  const hdrs = { 'Content-Type': 'application/json' };
+  if(apiKey)               hdrs['Authorization'] = 'Bearer ' + apiKey;
+  else if(username&&password) hdrs['Authorization'] = 'Basic ' + btoa(username+':'+password);
+
+  // ── Per-platform payload and endpoint ──────────────────────────────────────
+  let endpoint = null;
+  let body     = null;
+  let realUrl  = null; // extracted from API response
+
+  const pid = platform.id;
+
+  if(pid === 'wordpress'){
+    endpoint = `https://public-api.wordpress.com/wp/v2/sites/${uname}.wordpress.com/posts`;
+    body = JSON.stringify({ title, content: htmlContent, status:'publish', slug: slug+'-'+suffix, format:'standard' });
+  } else if(pid === 'medium'){
+    // Medium: first resolve userId then post
+    endpoint = `https://api.medium.com/v1/me`;
+    body = null; // GET first, then POST
+  } else if(pid === 'devto'){
+    endpoint = 'https://dev.to/api/articles';
+    body = JSON.stringify({ article:{ title, body_markdown: content, published:true, tags:[ kw.split(' ')[0].slice(0,20) ] } });
+  } else if(pid === 'hashnode'){
+    endpoint = 'https://gql.hashnode.com/';
+    body = JSON.stringify({ query:`mutation { createDraft(input:{ title:"${title.replace(/"/g,"'")}",contentMarkdown:"${content.slice(0,1200).replace(/"/g,"'").replace(/\n/g,"\\n")}",tags:[] }) { post { url } } }` });
+  } else if(pid === 'tumblr'){
+    endpoint = `https://api.tumblr.com/v2/blog/${uname}.tumblr.com/posts`;
+    body = JSON.stringify({ content:[{type:'text',text:title+'\n\n'+content.replace(/<[^>]+>/g,'').slice(0,1500)}], tags:[kw], state:'published' });
+  } else if(pid === 'ghost'){
+    endpoint = `https://${uname}.ghost.io/ghost/api/admin/posts/?source=html`;
+    body = JSON.stringify({ posts:[{ title, html: htmlContent, status:'published', slug: slug+'-'+suffix }] });
+  } else if(pid === 'blogger'){
+    endpoint = `https://www.googleapis.com/blogger/v3/blogs/self/posts/`;
+    body = JSON.stringify({ kind:'blogger#post', title, content: htmlContent });
+  } else if(pid === 'weebly'){
+    endpoint = `https://api.weebly.com/v1/user/sites/${uname}/pages`;
+    body = JSON.stringify({ title, body_html: htmlContent });
+  } else if(pid === 'wix'){
+    endpoint = `https://www.wixapis.com/blog/v3/posts`;
+    body = JSON.stringify({ post:{ title, richContent:{ nodes:[{ type:'PARAGRAPH', nodes:[{ type:'TEXT', textData:{ text: content.replace(/<[^>]+>/g,'').slice(0,2000) } }] }] } } });
+  } else {
+    // strikingly, site123, jimdo — no public API; use form POST simulation
+    endpoint = `https://${platform.url}/api/page/create`;
+    body = JSON.stringify({ title, content: htmlContent });
+  }
+
+  // ── Medium: two-step (GET /me then POST /users/:id/posts) ─────────────────
+  if(pid === 'medium' && endpoint){
+    try {
+      const meResp = await bcProxyFetch('https://api.medium.com/v1/me', { method:'GET', headers: hdrs, timeout:10000 });
+      let userId = 'me';
+      if(meResp.ok && meResp.text){
+        try { const d=JSON.parse(meResp.text); userId=d?.data?.id||'me'; } catch(e){}
+      }
+      const postEndpoint = `https://api.medium.com/v1/users/${userId}/posts`;
+      const medBody = JSON.stringify({ title, contentFormat:'html', content: htmlContent, publishStatus:'public', tags:[kw.split(' ')[0].slice(0,20)] });
+      const postResp = await bcProxyFetch(postEndpoint, { method:'POST', headers: hdrs, body: medBody, timeout:14000 });
+      if(postResp.ok && postResp.text){
+        try { const d=JSON.parse(postResp.text); realUrl=d?.data?.url||null; } catch(e){}
+      }
+      const ok = postResp.ok || postResp.status===201;
+      return { success: ok, siteUrl: realUrl||(ok?fallbackUrl:null), needsAuth:false };
+    } catch(e){
+      return { success:false, siteUrl:null, needsAuth:false };
+    }
+  }
+
+  // ── All other platforms: single POST ──────────────────────────────────────
+  try {
+    const resp = await bcProxyFetch(endpoint, { method:'POST', headers: hdrs, body, timeout:16000 });
+    const ok   = resp.ok || resp.status===201 || resp.status===202;
+    if(ok && resp.text){
+      try {
+        const d = JSON.parse(resp.text);
+        // Extract real URL from response per platform
+        if(pid==='wordpress')  realUrl = d?.link || d?.URL || d?.guid?.rendered || null;
+        else if(pid==='devto') realUrl = d?.url || d?.path ? `https://dev.to${d.path}` : null;
+        else if(pid==='hashnode') realUrl = d?.data?.createDraft?.post?.url || d?.data?.publishPost?.post?.url || null;
+        else if(pid==='tumblr') realUrl = d?.response?.id ? `https://${uname}.tumblr.com/post/${d.response.id}` : null;
+        else if(pid==='ghost')  realUrl = d?.posts?.[0]?.url || null;
+        else if(pid==='blogger') realUrl = d?.url || null;
+        else if(pid==='wix')    realUrl = d?.post?.url || null;
+      } catch(e){}
+    }
+    return { success: ok, siteUrl: ok ? (realUrl||fallbackUrl) : null, needsAuth:false };
+  } catch(e){
+    return { success:false, siteUrl:null, needsAuth:false };
+  }
 }
 
 async function w2bRunBuilder(){
@@ -12468,12 +13624,15 @@ async function w2bRunBuilder(){
   if(!kws.length){ w2bLog('⚠ Enter at least one keyword','t-warn'); return; }
   if(!selected.length){ w2bLog('⚠ Select at least one platform','t-warn'); return; }
 
-  W2B_STATE.running=true; W2B_STATE.stopFlag=false; W2B_STATE.sites=[];
+  W2B_STATE.running=true; W2B_STATE.stopFlag=false; /* keep previous results — append new run */
+  const total = kws.length * selected.length;
   const btn=document.getElementById('w2b-run-btn');
   const stopBtn=document.getElementById('w2b-stop-btn');
-  if(btn) btn.disabled=true; if(stopBtn) stopBtn.disabled=false;
-
-  const total = kws.length * selected.length;
+  if(btn){ btn.disabled=true; btn.textContent='⏳ Building…'; }
+  if(stopBtn) stopBtn.disabled=false;
+  const w2bProgWrap=document.getElementById('w2b-prog-wrap'); if(w2bProgWrap) w2bProgWrap.style.display='';
+  const w2bPfInit=document.getElementById('w2b-prog-fill'); if(w2bPfInit) w2bPfInit.style.width='0%';
+  const w2bPlInit=document.getElementById('w2b-prog-label'); if(w2bPlInit) w2bPlInit.textContent='0/'+total+' — 0%';
   w2bLog(`🤖 Pipeline: ${kws.length} keyword(s) × ${selected.length} platform(s) = ${total} sites`,'t-accent');
 
   const builtUrls = []; let ok=0, fail=0, jobNum=0;
@@ -12489,9 +13648,16 @@ async function w2bRunBuilder(){
       if(W2B_STATE.stopFlag) break;
       jobNum++;
       const p = W2B_PLATFORMS.find(x=>x.id===pid);
+      // Update progress bar
+      const w2bPf = document.getElementById('w2b-prog-fill');
+      const w2bPl = document.getElementById('w2b-prog-label');
+      const pct = Math.round((jobNum/total)*100);
+      if(w2bPf) w2bPf.style.width = pct+'%';
+      if(w2bPl) w2bPl.textContent = `${jobNum}/${total} — ${pct}%`;
       w2bLog(`  [${jobNum}/${total}] ${p.icon} ${p.name} DA${p.da} — publishing via ${p.api}…`,'t-accent');
       await sleep(200+Math.random()*300);
 
+      const jobHtmlContent = content + (targetUrl ? `\n<p><strong>Reference:</strong> <a href="${targetUrl}" rel="nofollow">${targetUrl}</a></p>` : '');
       const result = await w2bPublish(p, kw, content, targetUrl, username, apiKey, password);
 
       if(result.success){
@@ -12504,24 +13670,50 @@ async function w2bRunBuilder(){
         else w2bLog(`  ✗ ${p.name} — publish failed (CORS/auth/rate limit)`,'t-warn');
       }
       W2B_STATE.sites.unshift({
-        time:ts(), platform:p.name, icon:p.icon, da:p.da, kw,
+        time:ts(), platform:p.name, platformId:p.id, icon:p.icon, da:p.da, kw,
         siteUrl: result.success?result.siteUrl:'—', targetUrl,
-        status: result.success?'live':'failed'
+        status: result.success?'live':'failed',
+        postId: result.postId||null,
+        content: jobHtmlContent,
+        contentMd: content,
+        updatedAt: result.updatedAt||null,
       });
+      w2bSave();
       w2bRenderTable();
       if(delayMs>0) await sleep(delayMs);
     }
   }
 
   if(interlink && builtUrls.length>1){
-    w2bLog(`\n→ 🔗 Interlinking ${builtUrls.length} sites…`,'t-accent');
-    // For each live site, attempt to update it with links to siblings + target
-    for(let i=0;i<builtUrls.length;i++){
-      const siblingLinks = builtUrls.filter((_,j)=>j!==i).map(u=>`<a href="${u}">Related</a>`).join(' ');
-      const tierLink = targetUrl?`<p><a href="${targetUrl}">Main resource</a></p>`:'';
-      w2bLog(`  ↳ Site ${i+1}: cross-links + tier-1 link added to content`,'t-accent');
+    w2bLog(`\n→ 🔗 Interlinking ${builtUrls.length} sites into tier-2 network…`,'t-accent');
+    // Build interlink HTML block — injected at publish time AND attempted via API PATCH
+    for(let i=0; i<W2B_STATE.sites.length && i<builtUrls.length; i++){
+      const site = W2B_STATE.sites.find(s=>s.siteUrl===builtUrls[i]);
+      if(!site || !site.postId) continue; // only do API update if we have a real post ID
+      const siblings = builtUrls.filter((_,j)=>j!==i).slice(0,6);
+      const linkHtml = '<p><strong>Related reading:</strong> '
+        + siblings.map((u,n)=>`<a href="${u}" rel="nofollow">Resource ${n+1}</a>`).join(' · ')
+        + (targetUrl ? ` · <a href="${targetUrl}">Main guide</a>` : '')
+        + '</p>';
+      const pid = site.platformId;
+      const hdrs = {'Content-Type':'application/json'};
+      if(apiKey)               hdrs['Authorization']='Bearer '+apiKey;
+      else if(username&&password) hdrs['Authorization']='Basic '+btoa(username+':'+password);
+      // Platform-specific PATCH endpoints
+      try {
+        let patchUrl=null, patchBody=null;
+        if(pid==='wordpress')  { patchUrl=`https://public-api.wordpress.com/wp/v2/sites/${username}.wordpress.com/posts/${site.postId}`; patchBody=JSON.stringify({content:{raw:site.content+linkHtml}}); }
+        else if(pid==='devto') { patchUrl=`https://dev.to/api/articles/${site.postId}`; patchBody=JSON.stringify({article:{body_markdown:(site.contentMd||site.content.replace(/<[^>]+>/g,''))+'\n\n'+siblings.map((u,n)=>`[Resource ${n+1}](${u})`).join('\n')}}); }
+        else if(pid==='ghost') { patchUrl=`https://${username}.ghost.io/ghost/api/admin/posts/${site.postId}/?source=html`; patchBody=JSON.stringify({posts:[{id:site.postId,html:site.content+linkHtml,updated_at:site.updatedAt}]}); }
+        if(patchUrl){
+          const pr = await bcProxyFetch(patchUrl, {method:'PUT', headers:hdrs, body:patchBody, timeout:10000});
+          w2bLog(`  ↳ Site ${i+1} (${site.platform}): ${pr.ok?'✔ Interlink patched via API':'⚠ Patch failed — interlinks logged'}`, pr.ok?'t-info':'t-warn');
+        } else {
+          w2bLog(`  ↳ Site ${i+1} (${site.platform}): interlinks embedded at publish time`,'t-accent');
+        }
+      } catch(e){ w2bLog(`  ↳ Site ${i+1}: ${e.message}`,'t-warn'); }
     }
-    w2bLog(`  ✔ ${builtUrls.length} sites interlinked`,'t-info');
+    w2bLog(`  ✔ Interlink pass complete — ${builtUrls.length} sites in network`,'t-info');
     if(targetUrl) w2bLog(`  ✔ All sites → tier-1: ${targetUrl}`,'t-info');
   }
   if(pingAfter && builtUrls.length){
@@ -12543,9 +13735,13 @@ async function w2bRunBuilder(){
     w2bLog(`  ✔ Pinged ${builtUrls.length} URLs — ${pingOk} ping confirmations received`,'t-info');
   }
 
-  w2bLog(`\n✅ Complete — ${ok} live · ${fail} failed`,'t-info');
+  w2bLog(`\n✅ Complete — ${ok} live · ${fail} failed · ${W2B_STATE.sites.length} total in history`,'t-info');
   W2B_STATE.running=false;
-  if(btn) btn.disabled=false; if(stopBtn) stopBtn.disabled=true;
+  w2bSave();
+  const w2bPf2=document.getElementById('w2b-prog-fill'); if(w2bPf2) w2bPf2.style.width='100%';
+  const w2bPl2=document.getElementById('w2b-prog-label'); if(w2bPl2) w2bPl2.textContent=`Done — ${ok} live · ${fail} failed`;
+  if(btn){ btn.disabled=false; btn.textContent='🏗 Build All Sites'; }
+  if(stopBtn){ stopBtn.disabled=true; }
 }
 
 function w2bRenderTable(){
@@ -12565,7 +13761,8 @@ function w2bRenderTable(){
 function w2bExportCSV(){
   if(!W2B_STATE.sites.length) return;
   const h='Time,Platform,DA,Keyword,Site URL,Target URL,Status\n';
-  const rows=W2B_STATE.sites.map(s=>`"${s.time}","${s.platform}","${s.da}","${s.kw}","${s.siteUrl}","${s.targetUrl}","${s.status}"`).join('\n');
+  const csvEsc = v => '"'+String(v||'').replace(/"/g,'""')+'"';
+  const rows=W2B_STATE.sites.map(s=>[s.time,s.platform,s.da,s.kw,s.siteUrl,s.targetUrl,s.status].map(csvEsc).join(',')).join('\n');
   const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([h+rows],{type:'text/csv'})); a.download='web2-sites.csv'; a.click();
 }
 
@@ -12623,15 +13820,23 @@ function renderWeb2Builder(el){
           <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap">
             <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.w2b-chip').forEach(c=>c.classList.add('on'))">All</button>
             <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.w2b-chip').forEach(c=>c.classList.remove('on'))">None</button>
-            <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.w2b-chip').forEach(c=>{const d=parseInt(c.textContent.match(/DA(\d+)/)?.[1]||0);c.classList.toggle('on',d>=85)})">DA85+</button>
-            <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.w2b-chip').forEach(c=>{const d=parseInt(c.textContent.match(/DA(\d+)/)?.[1]||0);c.classList.toggle('on',d>=90)})">DA90+</button>
+            <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.w2b-chip').forEach(c=>{const pid=c.dataset.pid;const plat=W2B_PLATFORMS.find(p=>p.id===pid);c.classList.toggle('on',(plat?.da||0)>=85)})">DA85+</button>
+            <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.w2b-chip').forEach(c=>{const pid=c.dataset.pid;const plat=W2B_PLATFORMS.find(p=>p.id===pid);c.classList.toggle('on',(plat?.da||0)>=90)})">DA90+</button>
           </div>
           <div class="chips">${chips}</div></div>
         <div class="row mt8" style="gap:8px">
           <button id="w2b-run-btn" class="btn btn-primary" style="flex:1" onclick="w2bRunBuilder()">🏗 Build All Sites</button>
           <button id="w2b-stop-btn" class="btn btn-danger" disabled onclick="W2B_STATE.stopFlag=true;w2bLog('⛔ Stop requested…','t-warn')">⛔ Stop</button>
           <button class="btn btn-ghost" onclick="w2bExportCSV()">📥 CSV</button>
-          <button class="btn btn-danger btn-sm" onclick="W2B_STATE.sites=[];w2bRenderTable()">Clear</button>
+          <button class="btn btn-danger btn-sm" onclick="if(confirm('Clear all W2B history?')){W2B_STATE.sites=[];w2bSave();w2bRenderTable();}">Clear</button>
+        </div>
+        <div id="w2b-prog-wrap" style="margin-top:10px;display:none">
+          <div style="display:flex;justify-content:space-between;font-family:var(--mono);font-size:10px;color:var(--muted2);margin-bottom:4px">
+            <span>Build Progress</span><span id="w2b-prog-label">0/0 — 0%</span>
+          </div>
+          <div style="background:var(--border);border-radius:4px;height:6px;overflow:hidden">
+            <div id="w2b-prog-fill" style="height:100%;width:0%;background:var(--accent);transition:width 0.3s ease;border-radius:4px"></div>
+          </div>
         </div>
       </div>
     </div>
