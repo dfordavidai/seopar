@@ -7061,14 +7061,18 @@ async function bcWpLegacyComment(pageUrl, html, name, email, website, comment){
       // ── WP error signals — check FIRST before any success path ──
       // Keep TIGHT — broad keywords like 'error:' appear on normal post pages (theme JS, post content).
       // Only match patterns unique to WP's wp_die() / comment error output pages.
-      const hasWpError = lower.includes('wp-die')
+      // Real wp_die() pages are tiny (< 6KB). A full post page is always much larger.
+      // Never flag hasWpError on a large page -- it's a successful redirect to the post.
+      const hasWpError = lower.length < 6000 && (
+                         lower.includes('wp-die')
                       || lower.includes('wordpress › error')
                       || lower.includes('<title>error</title>')
                       || lower.includes('<title>wordpress error')
                       || lower.includes('sorry, you must be logged in to post a comment')
                       || lower.includes('you are posting comments too quickly')
                       || lower.includes('you are posting too quickly')
-                      || (lower.includes('duplicate comment') && lower.includes('wp-die'));
+                      || (lower.includes('duplicate comment') && lower.includes('wp-die'))
+                      );
 
       // ── Moderation signals ──
       const hasModeration = lower.includes('your comment is awaiting')
@@ -7082,12 +7086,16 @@ async function bcWpLegacyComment(pageUrl, html, name, email, website, comment){
       // ── Real success signals: page redirected back to the post with #comment-N ──
       // wp-comments-post.php on success does a 302 redirect to the post page
       // The proxy follows it and gives us the post page HTML or just a redirect signal
+      const commentNameLower = name.toLowerCase();
+      const commentTextSnippet = comment.slice(0, 40).toLowerCase();
       const hasSuccessSignal =
-        lower.includes('#comment-') ||                    // anchor to new comment
-        (lower.includes('comment-') && lower.includes('commentlist')) || // comment in list
+        lower.includes('#comment-') ||
+        (lower.includes('comment-') && lower.includes('commentlist')) ||
         lower.includes('comment posted successfully') ||
         lower.includes('thanks for commenting') ||
-        lower.includes('your comment has been');
+        lower.includes('your comment has been') ||
+        (commentNameLower.length > 2 && lower.includes(commentNameLower) && lower.includes('comment')) ||
+        (commentTextSnippet.length > 10 && lower.includes(commentTextSnippet));
 
       if(innerStatus === 302 || innerStatus === 301 || innerRedirected || resp.redirected){
         // Real redirect from wp-comments-post.php — definitive success
