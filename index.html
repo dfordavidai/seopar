@@ -1,4 +1,5 @@
 
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -12500,6 +12501,13 @@ const AC_PLATFORMS = [
   { id:'blogger',    name:'Blogger',       icon:'🟡', da:87, notes:'Google-owned · requires OAuth Google token' },
 ];
 
+// ─────────────────────────────────────────────────────────────────────────────
+// AC ENGINE v2 — ALL REGISTRATION ROUTED THROUGH VERCEL /api/register
+// No direct browser→platform calls. Server handles:
+//   mail.tm inbox creation · CSRF extraction · CAPTCHA solving · form submit
+//   inbox polling · verification link clicking
+// ─────────────────────────────────────────────────────────────────────────────
+
 function acLog(msg, cls='t-info'){
   const term = document.getElementById('ac-terminal');
   if(!term) return;
@@ -12508,11 +12516,65 @@ function acLog(msg, cls='t-info'){
   term.appendChild(line); term.scrollTop = term.scrollHeight;
 }
 
+// ── Get Vercel backend URL (required for all registration calls) ──────────────
+function acGetVercelBase(){
+  const url = (settingGet('vercel_url')||'').replace(/\/+$/,'');
+  return url || null;
+}
+
+// ── Call /api/register on the Vercel backend ──────────────────────────────────
+async function acServerRegister(pid, username, password, captchaKey, useMailTm, autoVerify){
+  const base = acGetVercelBase();
+  if(!base) throw new Error('Vercel Backend URL not set — go to Settings and enter your deployed URL (e.g. https://seoparapro.vercel.app)');
+
+  const secret = settingGet('vercel_secret')||'';
+
+  const payload = {
+    platform:   pid,
+    username,
+    password,
+    captchaKey: captchaKey || '',
+    useMailTm:  !!useMailTm,
+    autoVerify: !!autoVerify,
+  };
+
+  const headers = { 'Content-Type': 'application/json' };
+  if(secret) headers['X-API-Key'] = secret;
+
+  const resp = await fetch(`${base}/api/register`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(180000), // 3-min max — server polls inbox up to 90s
+  });
+
+  let data;
+  try { data = await resp.json(); } catch(e){ throw new Error(`Server returned non-JSON (HTTP ${resp.status})`); }
+
+  if(!resp.ok){
+    // Surface server-side error message if available
+    throw new Error(data?.error || data?.message || `Server error HTTP ${resp.status}`);
+  }
+
+  return data;
+  // Expected shape:
+  // {
+  //   ok: bool,
+  //   email: string,
+  //   apiKey: string|null,
+  //   profileUrl: string|null,
+  //   verifyStatus: 'verified'|'verify-link-found'|'no-email-required'|'manual-verify-needed'|'unverified',
+  //   note: string,
+  //   log: [ {msg, cls}, … ]   ← optional server-side log lines to replay in terminal
+  // }
+}
+
 function acGenUsername(base){
   const suffix = Math.floor(Math.random()*9000+1000);
   const adjectives = ['pro','expert','master','ace','elite','prime','alpha','digital','smart','peak'];
   const adj = adjectives[Math.floor(Math.random()*adjectives.length)];
-  const clean = (base||'user').toLowerCase().replace(/[^a-z0-9]/g,'');
+  // Strip everything non-alphanumeric, truncate to 12 chars, fall back to 'user'
+  const clean = (base||'').toLowerCase().replace(/[^a-z0-9]/g,'').slice(0,12) || 'user';
   return `${clean}${adj}${suffix}`;
 }
 
@@ -12521,243 +12583,22 @@ function acGenPassword(){
   return Array.from({length:14}, ()=>chars[Math.floor(Math.random()*chars.length)]).join('');
 }
 
-// ── MAIL.TM — create real disposable inbox + get JWT ────────────────────────
-async function acCreateMailTmInbox(address, password){
-  // 1. Create account
-  const r1 = await fetch('https://api.mail.tm/accounts', {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ address, password }),
-    signal: AbortSignal.timeout(12000)
-  });
-  if(!r1.ok && r1.status !== 422) throw new Error('mail.tm account creation failed: ' + r1.status);
-  // 2. Get JWT token
-  const r2 = await fetch('https://api.mail.tm/token', {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ address, password }),
-    signal: AbortSignal.timeout(12000)
-  });
-  if(!r2.ok) throw new Error('mail.tm auth failed: ' + r2.status);
-  const { token } = await r2.json();
-  return token;
-}
-
-// ── MAIL.TM — poll inbox for verification link ───────────────────────────────
-async function acPollForVerification(jwt, maxWaitMs=90000){
-  const deadline = Date.now() + maxWaitMs;
-  const seen = new Set();
-  while(Date.now() < deadline){
-    try {
-      const r = await fetch('https://api.mail.tm/messages?page=1', {
-        headers:{'Authorization':'Bearer '+jwt},
-        signal: AbortSignal.timeout(8000)
-      });
-      if(r.ok){
-        const data = await r.json();
-        const msgs = data['hydra:member']||[];
-        for(const msg of msgs){
-          if(seen.has(msg.id)) continue;
-          seen.add(msg.id);
-          // Fetch full message body
-          const mr = await fetch(`https://api.mail.tm/messages/${msg.id}`, {
-            headers:{'Authorization':'Bearer '+jwt},
-            signal: AbortSignal.timeout(8000)
-          });
-          if(mr.ok){
-            const full = await mr.json();
-            const body = full.text || full.html || '';
-            const links = [...body.matchAll(/https?:\/\/[^\s"'<>\]]+/g)].map(m=>m[0]);
-            const verifyLink = links.find(l =>
-              /verif|confirm|activate|click|token|signup|register|welcome/i.test(l)
-            );
-            if(verifyLink) return { found: true, link: verifyLink, subject: msg.subject };
-          }
-        }
-      }
-    } catch(e){}
-    await sleep(4000);
-  }
-  return { found: false, link: null };
-}
-
-// ── Click a verification link via CORS proxy ─────────────────────────────────
-async function acClickVerificationLink(url){
-  try {
-    const r = await bcProxyFetch(url, { method:'GET', timeout:15000 });
-    return r.ok || r.status < 400;
-  } catch(e){ return false; }
-}
-
-// ── Per-platform live registration ───────────────────────────────────────────
-async function acRegisterOnPlatform(pid, username, email, password, captchaKey){
-  const slug = username.toLowerCase().replace(/[^a-z0-9]/g,'-');
-
-  // ── Dev.to ──────────────────────────────────────────────────────────────────
-  if(pid === 'devto'){
-    let capToken = '';
-    try {
-      const cr = await capSolve({ type:'recaptcha_v2', siteKey:'6LeZOnQUAAAAABr0PGHH2EYuPlSXEfVQu07j2yca', siteUrl:'https://dev.to/enter' });
-      capToken = cr.token||'';
-    } catch(e){}
-    const r = await bcProxyFetch('https://dev.to/users', {
-      method:'POST',
-      headers:{'Content-Type':'application/json', 'X-CSRF-Token': capToken},
-      body: JSON.stringify({ user:{ name:username, email, password, username, terms:true, 'g-recaptcha-response':capToken } }),
-      timeout: 14000
-    });
-    const ok = r.ok || r.status===201 || r.status===200;
-    // Extract API key from response if present
-    let apiKey = null;
-    try { const d=JSON.parse(r.text||'{}'); apiKey = d?.api_secret || d?.token || null; } catch(e){}
-    return { ok, apiKey, profileUrl: ok ? `https://dev.to/${username}` : null, note: ok ? 'Registered via DEV API' : 'Registration blocked — CAPTCHA or rate limit' };
-  }
-
-  // ── Hashnode ─────────────────────────────────────────────────────────────────
-  if(pid === 'hashnode'){
-    const mutation = `mutation { createAccount(input: { email:"${email}", name:"${username}", username:"${username}", password:"${password}" }) { token user { username } } }`;
-    const r = await bcProxyFetch('https://gql.hashnode.com/', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ query: mutation }),
-      timeout: 14000
-    });
-    let apiKey = null, profileUrl = null;
-    try {
-      const d = JSON.parse(r.text||'{}');
-      apiKey   = d?.data?.createAccount?.token || null;
-      profileUrl = apiKey ? `https://hashnode.com/@${username}` : null;
-    } catch(e){}
-    return { ok: !!(apiKey), apiKey, profileUrl, note: apiKey ? 'Registered via Hashnode GraphQL — token captured' : 'Registration failed (username/email taken or CORS)' };
-  }
-
-  // ── WordPress.com ─────────────────────────────────────────────────────────────
-  if(pid === 'wordpress'){
-    // WordPress.com signup via REST
-    const r = await bcProxyFetch('https://public-api.wordpress.com/rest/v1.1/users/new', {
-      method:'POST',
-      headers:{'Content-Type':'application/x-www-form-urlencoded'},
-      body: new URLSearchParams({ email, username, password, signup_flow_name:'signup', locale:'en' }).toString(),
-      timeout: 16000
-    });
-    const ok = r.ok || r.status===200 || r.status===201;
-    return { ok, apiKey: null, profileUrl: ok ? `https://${username}.wordpress.com` : null, note: ok ? 'Registered — verify email to activate' : 'Registration failed (username taken or CORS)' };
-  }
-
-  // ── Medium ───────────────────────────────────────────────────────────────────
-  if(pid === 'medium'){
-    // Medium uses email magic-link — we can trigger via API
-    const r = await bcProxyFetch('https://medium.com/m/signin?redirect=/', {
-      method:'POST',
-      headers:{'Content-Type':'application/json', 'X-Obvious-CID':'web'},
-      body: JSON.stringify({ email, redirectPath:'/', operation:'login' }),
-      timeout: 14000
-    });
-    const ok = r.ok || r.status===200;
-    return { ok, apiKey: null, profileUrl: null, note: ok ? 'Magic link sent to inbox — click to verify & create account' : 'Medium sign-in request blocked (CORS)' };
-  }
-
-  // ── Tumblr ───────────────────────────────────────────────────────────────────
-  if(pid === 'tumblr'){
-    const r = await bcProxyFetch('https://www.tumblr.com/register', {
-      method:'POST',
-      headers:{'Content-Type':'application/x-www-form-urlencoded', 'X-Requested-With':'XMLHttpRequest'},
-      body: new URLSearchParams({ email, password, tumblelog: username, signup_status:'ACTIVE', age:25, context:'tumblr_dashboard_desktop' }).toString(),
-      timeout: 16000
-    });
-    const ok = r.ok || r.status===201;
-    return { ok, apiKey: null, profileUrl: ok ? `https://${username}.tumblr.com` : null, note: ok ? 'Registered on Tumblr' : 'Tumblr reg blocked — CAPTCHA or rate limit' };
-  }
-
-  // ── Reddit ───────────────────────────────────────────────────────────────────
-  if(pid === 'reddit'){
-    const r = await bcProxyFetch('https://www.reddit.com/api/register', {
-      method:'POST',
-      headers:{'Content-Type':'application/x-www-form-urlencoded', 'X-Requested-With':'XMLHttpRequest'},
-      body: new URLSearchParams({ email, user: username, passwd: password, passwd2: password, api_type:'json', rem:'false' }).toString(),
-      timeout: 16000
-    });
-    const ok = r.ok || r.status===200;
-    let note = 'Reddit reg attempted';
-    try { const d=JSON.parse(r.text||'{}'); if(d?.json?.errors?.length) note = 'Reddit error: '+d.json.errors[0]; } catch(e){}
-    return { ok: ok && !r.text?.includes('"errors": [['), apiKey: null, profileUrl: ok ? `https://reddit.com/user/${username}` : null, note };
-  }
-
-  // ── Weebly ───────────────────────────────────────────────────────────────────
-  if(pid === 'weebly'){
-    const r = await bcProxyFetch('https://www.weebly.com/app/do/member/create-account', {
-      method:'POST',
-      headers:{'Content-Type':'application/json', 'X-Requested-With':'XMLHttpRequest'},
-      body: JSON.stringify({ email, password, tos:true }),
-      timeout: 14000
-    });
-    const ok = r.ok || r.status===200;
-    return { ok, apiKey: null, profileUrl: null, note: ok ? 'Weebly account created — verify email to activate' : 'Weebly reg blocked' };
-  }
-
-  // ── Wix ───────────────────────────────────────────────────────────────────────
-  if(pid === 'wix'){
-    const r = await bcProxyFetch('https://users.wix.com/wix-users/register', {
-      method:'POST',
-      headers:{'Content-Type':'application/json', 'X-Wix-Client-Artifact-Id':'wix-users'},
-      body: JSON.stringify({ loginId:{ email }, password, profile:{ nickname:username } }),
-      timeout: 14000
-    });
-    const ok = r.ok || r.status===200;
-    return { ok, apiKey: null, profileUrl: null, note: ok ? 'Wix account registered' : 'Wix reg blocked (CORS/CAPTCHA)' };
-  }
-
-  // ── Strikingly ────────────────────────────────────────────────────────────────
-  if(pid === 'strikingly'){
-    const r = await bcProxyFetch('https://api.strikingly.com/api/v1/users', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ user:{ email, password } }),
-      timeout: 14000
-    });
-    const ok = r.ok || r.status===201;
-    return { ok, apiKey: null, profileUrl: null, note: ok ? 'Strikingly account created' : 'Strikingly reg blocked' };
-  }
-
-  // ── Site123 ───────────────────────────────────────────────────────────────────
-  if(pid === 'site123'){
-    const r = await bcProxyFetch('https://www.site123.com/api/user/register', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ email, password, name: username }),
-      timeout: 14000
-    });
-    const ok = r.ok || r.status===200;
-    return { ok, apiKey: null, profileUrl: null, note: ok ? 'Site123 account created' : 'Site123 reg blocked' };
-  }
-
-  // ── Quora ─────────────────────────────────────────────────────────────────────
-  if(pid === 'quora'){
-    const r = await bcProxyFetch('https://www.quora.com/graphql/gql_para_public', {
-      method:'POST',
-      headers:{'Content-Type':'application/json', 'quora-sign-ons-available':'1'},
-      body: JSON.stringify({ queryName:'EmailAuthMutation', variables:{ email, password, displayName:username, isSignup:true } }),
-      timeout: 14000
-    });
-    const ok = r.ok || r.status===200;
-    return { ok, apiKey: null, profileUrl: null, note: ok ? 'Quora reg attempted — check inbox for verification' : 'Quora reg blocked (CAPTCHA)' };
-  }
-
-  // ── Blogger ───────────────────────────────────────────────────────────────────
-  if(pid === 'blogger'){
-    return { ok: false, apiKey: null, profileUrl: null, note: 'Blogger requires Google OAuth — provide a Google Bearer token in API Key field, then use the W2B Builder to post' };
-  }
-
-  return { ok: false, apiKey: null, profileUrl: null, note: 'Platform not supported for live registration' };
-}
-
-// ── MAIN LIVE CREATION RUNNER ─────────────────────────────────────────────────
+// ── MAIN LIVE CREATION RUNNER (v2 — server-side via /api/register) ────────────
 async function acRunCreation(){
   if(AC_STATE.running) return;
+
+  // ── Guard: Vercel URL must be configured ──────────────────────────────────
+  const vercelBase = acGetVercelBase();
+  if(!vercelBase){
+    acLog('❌ Vercel Backend URL is not set!', 't-err');
+    acLog('  → Go to ⚙ Settings → Vercel Backend URL', 't-warn');
+    acLog('  → Enter your deployed URL, e.g. https://seoparapro.vercel.app', 'tm');
+    toast('Set your Vercel Backend URL in Settings first','e');
+    return;
+  }
+
   const baseUsername = document.getElementById('ac-username')?.value?.trim() || 'seouser';
-  const emailDomain  = document.getElementById('ac-email-domain')?.value?.trim() || '';
   const captchaKey   = document.getElementById('ac-captcha-key')?.value?.trim() || settingGet('cap_2captchaKey') || settingGet('cap_capSolverKey') || '';
-  const proxyVal     = document.getElementById('ac-proxy')?.value?.trim() || '';
   const countStr     = document.getElementById('ac-count')?.value || '1';
   const count        = Math.min(parseInt(countStr)||1, 20);
   const selected     = [...document.querySelectorAll('.ac-platform-chip.on')].map(c => c.dataset.pid);
@@ -12771,16 +12612,33 @@ async function acRunCreation(){
   const btn     = document.getElementById('ac-run-btn');  if(btn)  btn.disabled = true;
   const stopBtn = document.getElementById('ac-stop-btn'); if(stopBtn) stopBtn.disabled = false;
 
-  acLog(`🚀 Live Registration Engine — ${count} account(s) × ${selected.length} platform(s) = ${count*selected.length} total`, 't-accent');
-  if(proxyVal)   acLog(`  🛡 Proxy configured: ${proxyVal}`, 'tm');
+  const total = count * selected.length;
+  acLog(`🚀 Live Registration Engine v2 — server-side via ${vercelBase}`, 't-accent');
+  acLog(`   ${count} account(s) × ${selected.length} platform(s) = ${total} total`, 'tm');
   if(captchaKey) acLog(`  🔑 CAPTCHA solver key loaded`, 'tm');
-  if(useMailTm)  acLog(`  📧 mail.tm real inboxes enabled — will auto-poll for verification emails`, 'tm');
+  if(useMailTm)  acLog(`  📧 mail.tm inboxes enabled (server-side polling — no CORS limits)`, 'tm');
+  if(autoVerify) acLog(`  ✅ Auto email-verification enabled`, 'tm');
+
+  const signupMap = {
+    wordpress: 'https://wordpress.com/start',
+    medium:    'https://medium.com/m/signin',
+    reddit:    'https://www.reddit.com/register',
+    quora:     'https://www.quora.com/signup',
+    tumblr:    'https://www.tumblr.com/register',
+    weebly:    'https://www.weebly.com/signup',
+    blogger:   'https://www.blogger.com/about/',
+    wix:       'https://users.wix.com/signin?signupFirst=true',
+    devto:     'https://dev.to/enter?state=new-user',
+    hashnode:  'https://hashnode.com/onboard',
+    strikingly:'https://app.strikingly.com/users/sign_up',
+    site123:   'https://www.site123.com/signup',
+  };
 
   try {
     for(const pid of selected){
       if(AC_STATE.stopFlag) break;
       const plat = AC_PLATFORMS.find(p=>p.id===pid);
-      acLog(`\n→ [${plat.icon} ${plat.name} DA${plat.da}] Starting ${count} registration(s)…`, 't-accent');
+      acLog(`\n→ [${plat.icon} ${plat.name} DA${plat.da}] Starting ${count} registration(s) via server…`, 't-accent');
 
       for(let i=0; i<count; i++){
         if(AC_STATE.stopFlag) break;
@@ -12788,118 +12646,56 @@ async function acRunCreation(){
         const username = acGenUsername(baseUsername);
         const password = defaultPw || acGenPassword();
 
-        // ── Step 1: Get a real inbox via mail.tm ──────────────────────────────
-        let email     = '';
-        let mailJwt   = null;
-        let inboxNote = '';
-
-        if(useMailTm){
-          acLog(`  [${i+1}/${count}] 📧 Creating mail.tm inbox…`, 'tm');
-          try {
-            // Get a valid mail.tm domain first
-            const domainR = await fetch('https://api.mail.tm/domains?page=1', { signal: AbortSignal.timeout(8000) });
-            const domainData = await domainR.json();
-            const availDomain = domainData['hydra:member']?.[0]?.domain || 'mail.tm';
-            email   = `${username}@${availDomain}`;
-            const mailPw = acGenPassword();
-            mailJwt = await acCreateMailTmInbox(email, mailPw);
-            acLog(`  [${i+1}/${count}] ✔ Inbox ready: ${email}`, 't-info');
-          } catch(e){
-            // Fallback to random address if mail.tm fails
-            const fallbackDomains = emailDomain ? [emailDomain] : ['proton.me','outlook.com','gmail.com'];
-            email = `${username}@${fallbackDomains[Math.floor(Math.random()*fallbackDomains.length)]}`;
-            inboxNote = ' (mail.tm failed — using static address)';
-            acLog(`  [${i+1}/${count}] ⚠ mail.tm unavailable — using ${email}${inboxNote}`, 't-warn');
-          }
-        } else {
-          const fallbackDomains = emailDomain ? [emailDomain] : ['proton.me','outlook.com','gmail.com','yahoo.com'];
-          email = `${username}@${fallbackDomains[Math.floor(Math.random()*fallbackDomains.length)]}`;
-        }
-
-        // ── Step 2: Attempt live registration ─────────────────────────────────
-        acLog(`  [${i+1}/${count}] 🔄 Registering ${username} on ${plat.name}…`, 't-accent');
-        await sleep(500 + Math.random() * 800);
+        acLog(`  [${i+1}/${count}] 📡 Sending to server: ${username} @ ${plat.name}…`, 't-info');
 
         let result;
         try {
-          result = await acRegisterOnPlatform(pid, username, email, password, captchaKey);
+          result = await acServerRegister(pid, username, password, captchaKey, useMailTm, autoVerify);
         } catch(e){
-          result = { ok: false, apiKey: null, profileUrl: null, note: 'Error: ' + e.message };
+          acLog(`  [${i+1}/${count}] ❌ Server error: ${e.message}`, 't-err');
+          result = { ok:false, email:`${username}@unknown`, apiKey:null, profileUrl:null, verifyStatus:'unverified', note:'Server error: '+e.message, log:[] };
+        }
+
+        // ── Replay any server-side log lines ──────────────────────────────────
+        if(Array.isArray(result.log)){
+          for(const entry of result.log){
+            acLog(`  [server] ${entry.msg}`, entry.cls||'tm');
+          }
         }
 
         const status = result.ok ? 'live' : 'failed';
-        acLog(`  [${i+1}/${count}] ${result.ok ? '✔' : '✗'} ${plat.name} · ${username} · [${status}]`, result.ok ? 't-info' : 't-warn');
+        acLog(`  [${i+1}/${count}] ${result.ok?'✔':'✗'} ${plat.name} · ${username} · [${status}]`, result.ok?'t-info':'t-warn');
         acLog(`    ↳ ${result.note}`, 'tm');
-
-        // ── Step 3: Auto-verify email if we have a real inbox ─────────────────
-        let verifyStatus = 'unverified';
-        if(result.ok && mailJwt && autoVerify){
-          acLog(`  [${i+1}/${count}] 📬 Polling inbox for verification email (up to 90s)…`, 'tm');
-          try {
-            const verif = await acPollForVerification(mailJwt, 90000);
-            if(verif.found){
-              acLog(`  [${i+1}/${count}] ✔ Verification email: "${verif.subject}"`, 't-info');
-              acLog(`    ↳ Clicking: ${verif.link.slice(0,80)}…`, 'tm');
-              const clicked = await acClickVerificationLink(verif.link);
-              if(clicked){
-                verifyStatus = 'verified';
-                acLog(`  [${i+1}/${count}] ✅ Email verified — account fully activated!`, 't-accent');
-              } else {
-                verifyStatus = 'verify-link-found';
-                acLog(`  [${i+1}/${count}] ⚠ Link found but click blocked (CORS) — open manually: ${verif.link}`, 't-warn');
-              }
-            } else {
-              acLog(`  [${i+1}/${count}] ○ No verification email arrived (platform may not require it)`, 'tm');
-              verifyStatus = 'no-email-required';
-            }
-          } catch(e){
-            acLog(`  [${i+1}/${count}] ⚠ Inbox poll error: ${e.message}`, 't-warn');
-          }
-        } else if(result.ok && !mailJwt){
-          verifyStatus = 'manual-verify-needed';
-        }
-
-        if(result.apiKey) acLog(`  [${i+1}/${count}] 🔑 API token captured: ${result.apiKey.slice(0,20)}…`, 't-accent');
-
-        const signupMap = {
-          wordpress: 'https://wordpress.com/start',
-          medium:    'https://medium.com/m/signin',
-          reddit:    'https://www.reddit.com/register',
-          quora:     'https://www.quora.com/signup',
-          tumblr:    'https://www.tumblr.com/register',
-          weebly:    'https://www.weebly.com/signup',
-          blogger:   'https://www.blogger.com/about/',
-          wix:       'https://users.wix.com/signin?signupFirst=true',
-          devto:     'https://dev.to/enter?state=new-user',
-          hashnode:  'https://hashnode.com/onboard',
-          strikingly:'https://app.strikingly.com/users/sign_up',
-          site123:   'https://www.site123.com/signup',
-        };
+        if(result.apiKey) acLog(`  [${i+1}/${count}] 🔑 API token: ${result.apiKey.slice(0,20)}…`, 't-accent');
+        if(result.verifyStatus==='verified') acLog(`  [${i+1}/${count}] ✅ Email verified — account fully activated!`, 't-accent');
 
         const job = {
           time: ts(), platform: plat.name, icon: plat.icon, da: plat.da,
-          username, email, password,
-          apiKey: result.apiKey||'',
-          status, verifyStatus,
-          profileUrl: result.profileUrl||'',
-          note: result.note + inboxNote,
+          username,
+          email:       result.email || `${username}@unknown`,
+          password,
+          apiKey:      result.apiKey||'',
+          status,
+          verifyStatus: result.verifyStatus||'unverified',
+          profileUrl:  result.profileUrl||'',
+          note:        result.note||'',
           registerUrl: signupMap[pid] || `https://${pid}.com/signup`
         };
         AC_STATE.jobs.unshift(job);
         acRenderTable();
 
-        // Delay between accounts to avoid rate-limiting
-        if(i < count-1) await sleep(1500 + Math.random()*1000);
+        // Small delay between jobs to avoid hammering the server
+        if(i < count-1) await sleep(800 + Math.random()*500);
       }
 
-      if(pid !== selected[selected.length-1]) await sleep(2000);
+      if(pid !== selected[selected.length-1]) await sleep(1200);
     }
-  } catch(err) {
+  } catch(err){
     acLog(`⚠ Unexpected error: ${err.message}`, 't-warn');
   } finally {
-    const live   = AC_STATE.jobs.filter(j=>j.status==='live').length;
-    const verif  = AC_STATE.jobs.filter(j=>j.verifyStatus==='verified').length;
-    acLog(`\n✅ Done — ${live} live registrations · ${verif} email-verified · ${AC_STATE.jobs.length} total`, 't-accent');
+    const live  = AC_STATE.jobs.filter(j=>j.status==='live').length;
+    const verif = AC_STATE.jobs.filter(j=>j.verifyStatus==='verified').length;
+    acLog(`\n✅ Done — ${live} live · ${verif} verified · ${AC_STATE.jobs.length} total`, 't-accent');
     AC_STATE.running = false;
     if(btn)     btn.disabled = false;
     if(stopBtn) stopBtn.disabled = true;
@@ -12941,92 +12737,1041 @@ function acExportCSV(){
   a.download = 'live-accounts.csv'; a.click();
 }
 
+// ═══════════════════════════════════════════════════════════════
+// GOD-TIER UNIVERSAL ACCOUNT CREATOR — PLAYWRIGHT ENGINE
+// Handles ANY website with a registration/signup page
+// ═══════════════════════════════════════════════════════════════
+
+const UAC_STATE = {
+  running: false,
+  stopFlag: false,
+  jobs: [],
+  queue: [],
+};
+
+function uacLog(msg, cls='t-info'){
+  const term = document.getElementById('uac-terminal');
+  if(!term) return;
+  const line = document.createElement('div'); line.className = 'tline';
+  line.innerHTML = `<span class="ttime">${ts()}</span><span class="${cls}">${esc(msg)}</span>`;
+  term.appendChild(line); term.scrollTop = term.scrollHeight;
+}
+
+function uacGetVercelBase(){
+  return (settingGet('vercel_url')||'').replace(/\/+$/,'') || null;
+}
+
+// ── Universal register: POST to /api/universal-register on the backend ────────
+async function uacCallBackend(payload){
+  const base = uacGetVercelBase();
+  if(!base) throw new Error('Vercel Backend URL not set — go to ⚙ Settings');
+  const secret = settingGet('vercel_secret')||'';
+  const headers = {'Content-Type':'application/json'};
+  if(secret) headers['X-API-Key'] = secret;
+  const resp = await fetch(`${base}/api/universal-register`, {
+    method:'POST', headers,
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(240000), // 4-min max for captcha solve + verify
+  });
+  let data;
+  try { data = await resp.json(); } catch(e){ throw new Error(`Non-JSON response (HTTP ${resp.status})`); }
+  if(!resp.ok) throw new Error(data?.error || data?.message || `HTTP ${resp.status}`);
+  return data;
+}
+
+// ── mail.tm inbox creation (direct, no CORS issue via proxy) ──────────────────
+async function uacCreateMailTmInbox(){
+  try {
+    // Get available domains
+    const domResp = await fetch('https://api.mail.tm/domains?page=1', {signal:AbortSignal.timeout(10000)});
+    const domData = await domResp.json();
+    const domain = domData?.['hydra:member']?.[0]?.domain;
+    if(!domain) throw new Error('No mail.tm domain available');
+    const rnd = Math.random().toString(36).slice(2,10);
+    const address = `${rnd}@${domain}`;
+    const password = 'Reg!st3r#'+rnd;
+    // Create account
+    const accResp = await fetch('https://api.mail.tm/accounts', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({address, password}),
+      signal: AbortSignal.timeout(10000),
+    });
+    const accData = await accResp.json();
+    if(!accResp.ok) throw new Error(accData?.['hydra:description']||'mail.tm account creation failed');
+    // Get token
+    const tokResp = await fetch('https://api.mail.tm/token', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({address, password}),
+      signal: AbortSignal.timeout(10000),
+    });
+    const tokData = await tokResp.json();
+    if(!tokResp.ok) throw new Error('mail.tm token failed');
+    return { address, password, token: tokData.token, id: accData.id };
+  } catch(e){ throw new Error('mail.tm: '+e.message); }
+}
+
+// ── Poll mail.tm inbox for verification email, extract link ──────────────────
+async function uacPollMailTm(token, maxWaitMs=90000){
+  const start = Date.now();
+  uacLog('  📬 Polling mail.tm inbox for verification email…', 'tm');
+  while(Date.now()-start < maxWaitMs){
+    await sleep(4000);
+    try {
+      const r = await fetch('https://api.mail.tm/messages?page=1', {
+        headers:{'Authorization':'Bearer '+token},
+        signal: AbortSignal.timeout(8000),
+      });
+      const data = await r.json();
+      const msgs = data?.['hydra:member']||[];
+      if(msgs.length){
+        // Get first message body
+        const msgR = await fetch(`https://api.mail.tm/messages/${msgs[0].id}`, {
+          headers:{'Authorization':'Bearer '+token},
+          signal: AbortSignal.timeout(8000),
+        });
+        const msgData = await msgR.json();
+        const html = msgData.html?.[0] || msgData.text || '';
+        // Extract all https links
+        const links = [...html.matchAll(/https?:\/\/[^\s"'<>]+/g)].map(m=>m[0]);
+        // Prioritize verify/confirm/activate links
+        const verifyLink = links.find(l=>/verif|confirm|activ|token|activate|register/i.test(l));
+        return { found:true, link: verifyLink||links[0]||null, subject: msgs[0].subject||'' };
+      }
+    } catch(e){ /* continue polling */ }
+    uacLog('  📬 Waiting for email… '+(Math.round((Date.now()-start)/1000))+'s', 'tm');
+  }
+  return { found:false, link:null, subject:'' };
+}
+
+// ── Click a verification link (via Vercel backend to avoid CORS) ───────────────
+async function uacClickVerifyLink(link){
+  const base = uacGetVercelBase();
+  if(!base || !link) return false;
+  try {
+    const resp = await fetch(`${base}/api/click-link`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({url:link}),
+      signal: AbortSignal.timeout(30000),
+    });
+    return resp.ok;
+  } catch(e){ return false; }
+}
+
+// ── Generate smart profile data ───────────────────────────────────────────────
+function uacGenProfile(baseUsername){
+  const rnd4 = ()=>Math.floor(Math.random()*9000+1000);
+  const firstNames = ['Alex','Jordan','Morgan','Taylor','Casey','Riley','Avery','Quinn','Blake','Drew','Jamie','Reese','Skylar','Sage','Finley'];
+  const lastNames = ['Smith','Johnson','Williams','Brown','Davis','Miller','Wilson','Moore','Taylor','Anderson','Thomas','Jackson','White','Harris','Martin'];
+  const clean = (baseUsername||'').toLowerCase().replace(/[^a-z0-9]/g,'').slice(0,12) || 'user';
+  const adj = ['pro','ace','elite','prime','alpha','digital','smart','peak','top','best'][Math.floor(Math.random()*10)];
+  const first = firstNames[Math.floor(Math.random()*firstNames.length)];
+  const last = lastNames[Math.floor(Math.random()*lastNames.length)];
+  const suffix = rnd4();
+  const username = `${clean}${adj}${suffix}`;
+  const chars = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$%';
+  const password = Array.from({length:14},()=>chars[Math.floor(Math.random()*chars.length)]).join('');
+  const birthYear = 1985 + Math.floor(Math.random()*15);
+  return {
+    username, password,
+    firstName: first, lastName: last, fullName: `${first} ${last}`,
+    birthYear, birthMonth: String(Math.floor(Math.random()*12)+1).padStart(2,'0'),
+    birthDay: String(Math.floor(Math.random()*28)+1).padStart(2,'0'),
+    phone: `+1${rnd4()}${rnd4().toString().slice(0,3)}${rnd4().toString().slice(0,4)}`,
+    website: `https://${clean}${suffix}.com`,
+    bio: `Digital professional · Content creator · Building online since ${birthYear}`,
+    country: 'United States', city: 'New York', zipcode: '10001', gender: 'Male',
+  };
+}
+
+// ── MAIN UNIVERSAL REGISTRATION RUNNER ───────────────────────────────────────
+async function uacRunCreation(){
+  if(UAC_STATE.running) return;
+
+  const base = uacGetVercelBase();
+  if(!base){
+    uacLog('❌ Vercel Backend URL not set — go to ⚙ Settings', 't-err');
+    toast('Set your Vercel Backend URL in Settings first','e');
+    return;
+  }
+
+  // Collect URLs from textarea
+  const rawUrls = (document.getElementById('uac-urls')?.value||'').split('\n').map(u=>u.trim()).filter(u=>u.startsWith('http'));
+  if(!rawUrls.length){ uacLog('⚠ Enter at least one registration URL', 't-warn'); return; }
+
+  const baseUsername  = document.getElementById('uac-username')?.value?.trim() || 'seouser';
+  const captchaKey    = document.getElementById('uac-captcha-key')?.value?.trim() || settingGet('cap_2captchaKey') || '';
+  const countPerSite  = Math.min(parseInt(document.getElementById('uac-count')?.value)||1, 10);
+  const useMailTm     = document.getElementById('uac-use-mailtm')?.checked !== false;
+  const autoVerify    = document.getElementById('uac-auto-verify')?.checked !== false;
+  const customEmail   = document.getElementById('uac-custom-email')?.value?.trim()||'';
+  const customPw      = document.getElementById('uac-custom-pw')?.value?.trim()||'';
+  const proxyStr      = document.getElementById('uac-proxy')?.value?.trim()||'';
+  const headless      = document.getElementById('uac-headless')?.checked !== false;
+
+  UAC_STATE.running = true; UAC_STATE.stopFlag = false;
+  const runBtn  = document.getElementById('uac-run-btn');  if(runBtn)  runBtn.disabled=true;
+  const stopBtn = document.getElementById('uac-stop-btn'); if(stopBtn) stopBtn.disabled=false;
+
+  uacLog(`🚀 GOD-TIER UNIVERSAL ACCOUNT CREATOR — ENGINE START`, 't-accent');
+  uacLog(`   ${rawUrls.length} site(s) × ${countPerSite} account(s) = ${rawUrls.length*countPerSite} total`, 'tm');
+  uacLog(`   Backend: ${base}`, 'tm');
+  if(captchaKey) uacLog(`   🔑 2Captcha key loaded — CAPTCHA auto-solve ENABLED`, 't-accent');
+  else uacLog(`   ⚠ No CAPTCHA key — will attempt to bypass or fail on CAPTCHA sites`, 't-warn');
+  if(useMailTm)  uacLog(`   📧 mail.tm disposable inboxes enabled`, 'tm');
+  if(autoVerify) uacLog(`   ✅ Auto email-verification enabled`, 'tm');
+  if(proxyStr)   uacLog(`   🛡 Proxy: ${proxyStr}`, 'tm');
+
+  try {
+    for(const siteUrl of rawUrls){
+      if(UAC_STATE.stopFlag) break;
+      uacLog(`\n━━━ TARGET: ${siteUrl} ━━━`, 't-accent');
+
+      for(let i=0; i<countPerSite; i++){
+        if(UAC_STATE.stopFlag) break;
+
+        const profile = uacGenProfile(baseUsername);
+        if(customPw) profile.password = customPw;
+
+        // ── Step 1: Create disposable email ──────────────────────────────────
+        let emailAddress = customEmail;
+        let mailTmToken  = null;
+        let mailTmAddr   = null;
+
+        if(useMailTm && !customEmail){
+          try {
+            uacLog(`  [${i+1}] 📧 Creating mail.tm inbox…`, 'tm');
+            const inbox = await uacCreateMailTmInbox();
+            emailAddress = inbox.address;
+            mailTmToken  = inbox.token;
+            mailTmAddr   = inbox.address;
+            uacLog(`  [${i+1}] ✔ Inbox: ${emailAddress}`, 't-info');
+          } catch(e){
+            uacLog(`  [${i+1}] ⚠ mail.tm failed: ${e.message} — using fallback`, 't-warn');
+            emailAddress = `${profile.username}@guerrillamail.com`;
+          }
+        }
+        if(!emailAddress) emailAddress = `${profile.username}@guerrillamail.com`;
+        profile.email = emailAddress;
+
+        // ── Step 2: Send to Playwright backend ───────────────────────────────
+        uacLog(`  [${i+1}] 🤖 Launching Playwright → ${siteUrl}`, 't-info');
+        uacLog(`  [${i+1}]    Username: ${profile.username} · Email: ${emailAddress}`, 'tm');
+
+        let result = { ok:false, note:'Not attempted', log:[], formFields:[], submitStatus:'', profileUrl:'' };
+        try {
+          result = await uacCallBackend({
+            url:        siteUrl,
+            profile,
+            captchaKey: captchaKey||'',
+            proxy:      proxyStr||'',
+            headless:   headless,
+            autoVerify: autoVerify && !!mailTmToken, // server does its own verify only if we also poll
+          });
+        } catch(e){
+          uacLog(`  [${i+1}] ❌ Backend error: ${e.message}`, 't-err');
+          result = { ok:false, note:`Backend error: ${e.message}`, log:[], formFields:[], submitStatus:'error', profileUrl:'' };
+        }
+
+        // ── Replay server log lines ───────────────────────────────────────────
+        if(Array.isArray(result.log)){
+          for(const entry of result.log){
+            uacLog(`    [server] ${entry.msg}`, entry.cls||'tm');
+          }
+        }
+
+        // ── Step 3: Poll inbox for verification email ─────────────────────────
+        let verifyStatus = result.verifyStatus || 'unverified';
+        let verifyLink   = result.verifyLink || null;
+
+        if(autoVerify && mailTmToken && result.ok && verifyStatus !== 'verified'){
+          uacLog(`  [${i+1}] ⏳ Polling inbox for verification email…`, 'tm');
+          const mailResult = await uacPollMailTm(mailTmToken, 90000);
+          if(mailResult.found && mailResult.link){
+            uacLog(`  [${i+1}] 📨 Email received: "${mailResult.subject}"`, 't-info');
+            uacLog(`  [${i+1}] 🔗 Verify link: ${mailResult.link.slice(0,80)}…`, 't-accent');
+            // Click the verify link via backend
+            uacLog(`  [${i+1}] 🖱 Clicking verify link via backend…`, 'tm');
+            const clicked = await uacClickVerifyLink(mailResult.link);
+            verifyStatus = clicked ? 'verified' : 'verify-link-found';
+            verifyLink   = mailResult.link;
+            if(clicked) uacLog(`  [${i+1}] ✅ Account VERIFIED — fully activated!`, 't-accent');
+            else uacLog(`  [${i+1}] ⚠ Link found but click failed — check manually`, 't-warn');
+          } else {
+            uacLog(`  [${i+1}] ⚠ No verification email in 90s — may not require it`, 't-warn');
+            verifyStatus = 'no-email-received';
+          }
+        }
+
+        // ── Step 4: Record result ─────────────────────────────────────────────
+        const job = {
+          time: ts(),
+          siteUrl: siteUrl,
+          siteName: (() => { try { return new URL(siteUrl).hostname.replace('www.',''); } catch(e){ return siteUrl; } })(),
+          username:     profile.username,
+          email:        emailAddress,
+          password:     profile.password,
+          firstName:    profile.firstName,
+          lastName:     profile.lastName,
+          status:       result.ok ? 'live' : 'failed',
+          verifyStatus,
+          verifyLink:   verifyLink||'',
+          profileUrl:   result.profileUrl||'',
+          formFields:   (result.formFields||[]).join(', '),
+          captchaSolved: result.captchaSolved||false,
+          note:          result.note||'',
+          submitStatus:  result.submitStatus||'',
+        };
+        UAC_STATE.jobs.unshift(job);
+        uacRenderTable();
+
+        const statusIcon = result.ok ? '✅' : '❌';
+        uacLog(`  [${i+1}] ${statusIcon} ${job.siteName} · ${profile.username} → ${result.ok?'LIVE':'FAILED'}`, result.ok?'t-info':'t-warn');
+        if(result.formFields?.length) uacLog(`    ↳ Fields filled: ${result.formFields.join(', ')}`, 'tm');
+        if(result.captchaSolved) uacLog(`    ↳ 🧩 CAPTCHA solved via 2captcha`, 't-accent');
+        uacLog(`    ↳ ${result.note||''}`, 'tm');
+
+        if(i < countPerSite-1) await sleep(1500 + Math.random()*1000);
+      }
+
+      if(siteUrl !== rawUrls[rawUrls.length-1]) await sleep(2000);
+    }
+  } catch(err){
+    uacLog(`⚠ Fatal error: ${err.message}`, 't-warn');
+  } finally {
+    const live   = UAC_STATE.jobs.filter(j=>j.status==='live').length;
+    const verif  = UAC_STATE.jobs.filter(j=>j.verifyStatus==='verified').length;
+    uacLog(`\n🏁 DONE — ${live} live · ${verif} verified · ${UAC_STATE.jobs.length} total`, 't-accent');
+    UAC_STATE.running = false;
+    if(runBtn)  runBtn.disabled  = false;
+    if(stopBtn) stopBtn.disabled = true;
+  }
+}
+
+function uacRenderTable(){
+  const tbody = document.getElementById('uac-tbody');
+  if(!tbody) return;
+  if(!UAC_STATE.jobs.length){
+    tbody.innerHTML='<tr><td colspan="10" style="text-align:center;padding:28px;color:var(--muted2);font-family:var(--mono);font-size:11px">No accounts yet — paste URLs and click Go</td></tr>';
+    return;
+  }
+  tbody.innerHTML = UAC_STATE.jobs.slice(0,500).map(j=>`<tr>
+    <td class="mono xs tm">${j.time}</td>
+    <td class="mono xs ta" style="max-width:120px;overflow:hidden;text-overflow:ellipsis" title="${esc(j.siteUrl)}">${esc(j.siteName)}</td>
+    <td class="mono xs" style="cursor:pointer" onclick="navigator.clipboard?.writeText('${esc(j.username)}')" title="Copy">${esc(j.username)}</td>
+    <td class="mono xs tm" style="cursor:pointer" onclick="navigator.clipboard?.writeText('${esc(j.email)}')" title="Copy">${esc(j.email)}</td>
+    <td class="mono xs" style="cursor:pointer" onclick="navigator.clipboard?.writeText('${esc(j.password)}')" title="Copy">${esc(j.password)}</td>
+    <td class="mono xs tm" style="font-size:9px;max-width:100px;overflow:hidden;text-overflow:ellipsis">${esc(j.formFields.slice(0,60))}</td>
+    <td>${j.captchaSolved?'<span class="badge badge-g">✔ SOLVED</span>':'<span class="badge" style="background:#555;color:#ccc">—</span>'}</td>
+    <td>
+      <span class="badge ${j.status==='live'?'badge-g':'badge-r'}" style="margin-bottom:2px">${j.status.toUpperCase()}</span><br>
+      <span class="badge ${j.verifyStatus==='verified'?'badge-g':j.verifyStatus==='no-email-required'?'badge-b':j.verifyStatus.includes('found')?'badge-y':'badge-r'}" style="font-size:7px">${(j.verifyStatus||'').replace(/-/g,' ').toUpperCase()}</span>
+    </td>
+    <td style="font-size:9px;color:var(--muted2);font-family:var(--mono);max-width:140px;overflow:hidden;text-overflow:ellipsis">${esc((j.note||'').slice(0,60))}</td>
+    <td style="white-space:nowrap">
+      ${j.profileUrl?`<a href="${esc(j.profileUrl)}" target="_blank" class="btn btn-blue btn-xs" style="margin-bottom:2px">Profile ↗</a><br>`:''}
+      ${j.verifyLink?`<a href="${esc(j.verifyLink)}" target="_blank" class="btn btn-ghost btn-xs" style="margin-bottom:2px">Verify ↗</a><br>`:''}
+      <a href="${esc(j.siteUrl)}" target="_blank" class="btn btn-ghost btn-xs">Site ↗</a>
+    </td>
+  </tr>`).join('');
+}
+
+function uacExportCSV(){
+  if(!UAC_STATE.jobs.length) return;
+  const h = 'Time,Site,SiteURL,Username,Email,Password,FormFields,CaptchaSolved,Status,VerifyStatus,ProfileURL,Note\n';
+  const rows = UAC_STATE.jobs.map(j=>`"${j.time}","${j.siteName}","${j.siteUrl}","${j.username}","${j.email}","${j.password}","${j.formFields}","${j.captchaSolved}","${j.status}","${j.verifyStatus}","${j.profileUrl}","${(j.note||'').replace(/"/g,"'")}"`).join('\n');
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([h+rows],{type:'text/csv'}));
+  a.download='universal-accounts.csv'; a.click();
+}
+
+// ══════════════════════════════════════════════════════════════
+// VERCEL BACKEND CODE (shows in UI as copy-paste reference)
+// ══════════════════════════════════════════════════════════════
+const UAC_BACKEND_CODE = `// /api/universal-register.js — Deploy to Vercel (Node.js)
+// npm install: playwright-core @playwright/browser-chromium node-fetch
+
+import { chromium } from 'playwright-core';
+import * as chromiumExec from '@sparticuz/chromium';
+
+const FIELD_MAP = {
+  // email patterns
+  email: ['email','e-mail','mail','correo','e_mail','emailaddress','user_email','account_email','login_email'],
+  // username
+  username: ['username','user_name','userid','user','login','handle','nickname','account_name','nick','screen_name','display_name','user_login','uname'],
+  // password
+  password: ['password','passwd','pass','pwd','contraseña','mot_de_passe','passwort','new_password','password1','account_password','user_password'],
+  password2: ['password_confirmation','password2','confirm_password','retype_password','repeat_password','confirmpassword','repassword','pass2','verify_password','password_confirm'],
+  // name fields
+  firstName: ['first_name','firstname','fname','given_name','forename','name_first','first','prenom','vorname'],
+  lastName: ['last_name','lastname','lname','family_name','surname','name_last','last','nom','nachname'],
+  fullName: ['name','full_name','fullname','your_name','display_name','real_name','author_name','realname','complete_name'],
+  // phone
+  phone: ['phone','telephone','tel','mobile','cell','phone_number','phonenumber','mobile_number','contact_number'],
+  // other
+  website: ['website','url','site','homepage','web','blog','portfolio','site_url'],
+  bio: ['bio','about','description','about_me','biography','introduction','intro','profile_description'],
+  city: ['city','town','locality'],
+  country: ['country','nation','country_code'],
+  zipcode: ['zip','zipcode','postal_code','postcode','zip_code'],
+  birthYear: ['birth_year','year','dob_year','birthday_year','year_of_birth'],
+  birthMonth: ['birth_month','month','dob_month','birthday_month'],
+  birthDay: ['birth_day','day','dob_day','birthday_day'],
+  gender: ['gender','sex'],
+};
+
+// Find which profile field maps to an input element
+function detectField(el){
+  const name = (el.getAttribute('name')||'').toLowerCase().replace(/[\\[\\]]/g,'-');
+  const id   = (el.getAttribute('id')||'').toLowerCase();
+  const ph   = (el.getAttribute('placeholder')||'').toLowerCase();
+  const lbl  = el.closest?.('label')?.textContent?.toLowerCase() || '';
+  const aria = (el.getAttribute('aria-label')||'').toLowerCase();
+  const combined = [name,id,ph,lbl,aria].join(' ');
+  for(const [field, patterns] of Object.entries(FIELD_MAP)){
+    if(patterns.some(p => combined.includes(p))) return field;
+  }
+  // type-based fallback
+  const type = (el.getAttribute('type')||'text').toLowerCase();
+  if(type==='email') return 'email';
+  if(type==='password') return 'password';
+  if(type==='tel') return 'phone';
+  if(type==='url') return 'website';
+  return null;
+}
+
+export default async function handler(req, res) {
+  if(req.method!=='POST') return res.status(405).json({error:'Method Not Allowed'});
+  const {url, profile, captchaKey, proxy, headless=true, autoVerify} = req.body||{};
+  if(!url||!profile) return res.status(400).json({error:'url and profile required'});
+
+  const log = [];
+  const L = (msg,cls='tm') => { log.push({msg,cls}); console.log(msg); };
+
+  let browser, context, page;
+  const result = {
+    ok:false, note:'', log,
+    formFields:[], captchaSolved:false,
+    verifyStatus:'unverified', verifyLink:null, profileUrl:null,
+    submitStatus:''
+  };
+
+  try {
+    L(\`🌐 Launching Chromium → \${url}\`,'t-accent');
+    const launchOpts = {
+      executablePath: await chromiumExec.executablePath(),
+      args: [...chromiumExec.args,'--no-sandbox','--disable-setuid-sandbox'],
+      headless: chromiumExec.headless,
+    };
+    if(proxy) launchOpts.proxy = {server: proxy};
+    browser = await chromium.launch(launchOpts);
+    context = await browser.newContext({
+      userAgent:'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      viewport:{width:1280,height:800},
+      locale:'en-US',
+    });
+    page = await context.newPage();
+
+    // ── Navigate to the target URL ───────────────────────────────────────────
+    await page.goto(url, {waitUntil:'networkidle', timeout:30000});
+    L(\`  ✔ Page loaded: \${await page.title()}\`,'t-info');
+
+    // ── Find registration page if not already on it ──────────────────────────
+    const signupSelectors = [
+      'a[href*="signup"]','a[href*="register"]','a[href*="join"]','a[href*="create-account"]',
+      'a[href*="sign-up"]','a[href*="create_account"]','a[href*="new-account"]','a[href*="enroll"]',
+      'a:text-matches("sign up","i")','a:text-matches("register","i")','a:text-matches("create account","i")',
+      'a:text-matches("join","i")','a:text-matches("get started","i")','a:text-matches("join free","i")',
+      'button:text-matches("sign up","i")','button:text-matches("register","i")',
+    ];
+
+    // Check if we're already on a registration page
+    const isRegPage = await page.evaluate(() => {
+      const bodyText = document.body?.innerText?.toLowerCase()||'';
+      const formInputs = document.querySelectorAll('input[type="password"],input[name*="password"],input[name*="email"]').length;
+      return formInputs >= 2 || /sign.?up|register|create.+account|join.+free/i.test(bodyText.slice(0,500));
+    });
+
+    if(!isRegPage){
+      L('  🔍 Not on reg page — searching for signup link…','tm');
+      let found = false;
+      for(const sel of signupSelectors){
+        try {
+          const el = await page.$(sel);
+          if(el){
+            const href = await el.getAttribute('href')||'';
+            L(\`  → Found signup link: \${href||sel}\`,'t-info');
+            await el.click();
+            await page.waitForLoadState('networkidle',{timeout:10000}).catch(()=>{});
+            found = true; break;
+          }
+        } catch(e){}
+      }
+      if(!found) {
+        L('  ⚠ Could not find signup link — attempting to fill forms on current page','t-warn');
+      }
+    } else {
+      L('  ✔ Already on registration page','t-info');
+    }
+
+    await page.waitForTimeout(1500);
+
+    // ── Detect and fill all form fields ─────────────────────────────────────
+    L('  🔎 Scanning form fields…','tm');
+    const fieldsFilled = [];
+
+    const inputs = await page.$$('input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="image"]):not([type="reset"]):not([type="file"]), select, textarea');
+    L(\`  → Found \${inputs.length} form field(s)\`,'tm');
+
+    for(const input of inputs){
+      try {
+        const tagName = await input.evaluate(el=>el.tagName.toLowerCase());
+        const type    = await input.evaluate(el=>(el.getAttribute('type')||'text').toLowerCase());
+        const name    = await input.evaluate(el=>el.getAttribute('name')||'');
+        const isVisible = await input.isVisible();
+        if(!isVisible) continue;
+
+        if(tagName==='select'){
+          // Select first non-empty option, or detect gender/country
+          await input.evaluate(el=>{
+            if(el.options.length>1) el.selectedIndex=1;
+            // Try to match gender
+            const opts=[...el.options].map(o=>o.value.toLowerCase());
+            const maleIdx=opts.findIndex(o=>o==='male'||o==='m');
+            if(maleIdx>-1) el.selectedIndex=maleIdx;
+          });
+          fieldsFilled.push('select:'+name);
+          continue;
+        }
+
+        if(type==='checkbox'){
+          // Check it (agree to terms, newsletter etc.)
+          const checked = await input.isChecked();
+          if(!checked) await input.check().catch(()=>{});
+          fieldsFilled.push('checkbox:'+name);
+          continue;
+        }
+
+        if(type==='radio'){
+          await input.check().catch(()=>{});
+          fieldsFilled.push('radio:'+name);
+          continue;
+        }
+
+        const field = await input.evaluate(detectField.toString()+'\\n return detectField(arguments[0]);');
+        // ↑ We can't pass the fn directly cross-page; do it differently:
+        const nameAttr = await input.evaluate(el=>el.getAttribute('name')||'');
+        const idAttr   = await input.evaluate(el=>el.getAttribute('id')||'');
+        const phAttr   = await input.evaluate(el=>el.getAttribute('placeholder')||'');
+        const combined = [nameAttr,idAttr,phAttr].join(' ').toLowerCase();
+
+        let value = null;
+        const pw = /password|passwd|pass\\b|pwd/i;
+        const pw2 = /confirm|password2|retype|repeat|verify/i;
+        const em = /email|e-mail|mail/i;
+        const un = /user|login|handle|nick|screen/i;
+        const fn = /first.?name|fname|given/i;
+        const ln = /last.?name|lname|family|surname/i;
+        const full = /\\bname\\b|full.?name|display.?name|real.?name/i;
+        const ph2 = /phone|mobile|tel/i;
+        const web = /website|\\burl\\b|blog|homepage/i;
+        const bio2 = /bio|about|description/i;
+        const city = /city|town/i;
+        const country = /country/i;
+        const zip = /zip|postal/i;
+        const bday = /birth|dob|birthday|\\byear\\b|\\bmonth\\b|\\bday\\b/i;
+
+        if(pw2.test(combined) && !pw2.test(combined.split('password')[0])) value=profile.password;
+        else if(pw.test(combined)) value=profile.password;
+        else if(em.test(combined)) value=profile.email;
+        else if(un.test(combined)) value=profile.username;
+        else if(fn.test(combined)) value=profile.firstName;
+        else if(ln.test(combined)) value=profile.lastName;
+        else if(full.test(combined)) value=profile.fullName;
+        else if(ph2.test(combined)) value=profile.phone;
+        else if(web.test(combined)) value=profile.website;
+        else if(bio2.test(combined)) value=profile.bio;
+        else if(city.test(combined)) value=profile.city;
+        else if(country.test(combined)) value=profile.country;
+        else if(zip.test(combined)) value=profile.zipcode;
+        else if(/birth.?year|year.?of.?birth/i.test(combined)) value=String(profile.birthYear);
+        else if(/birth.?month|month.?of.?birth/i.test(combined)) value=profile.birthMonth;
+        else if(/birth.?day|day.?of.?birth/i.test(combined)) value=profile.birthDay;
+        else if(type==='email') value=profile.email;
+        else if(type==='password') value=profile.password;
+        else if(type==='tel') value=profile.phone;
+        else if(type==='url') value=profile.website;
+        else if(type==='text' || type==='') {
+          // Try to infer from any signal
+          if(/user|name/i.test(combined)) value=profile.username;
+        }
+
+        if(value!==null){
+          await input.fill(String(value));
+          fieldsFilled.push(nameAttr||idAttr||type);
+          L(\`    ✔ Filled [\${nameAttr||idAttr||type}] = \${type==='password'?'***':String(value).slice(0,30)}\`,'tm');
+          await page.waitForTimeout(120+Math.random()*80);
+        }
+      } catch(e){ /* field inaccessible, skip */ }
+    }
+
+    result.formFields = fieldsFilled;
+    L(\`  ✔ Filled \${fieldsFilled.length} field(s)\`,'t-info');
+
+    // ── CAPTCHA detection & solving ───────────────────────────────────────────
+    const hasCaptcha = await page.evaluate(()=>{
+      return !!(document.querySelector('.g-recaptcha,.h-captcha,[data-sitekey],iframe[src*="recaptcha"],iframe[src*="hcaptcha"],#cf-challenge-running,#challenge-form'))||
+             (document.body?.innerHTML||'').includes('data-sitekey');
+    });
+
+    if(hasCaptcha && captchaKey){
+      L('  🧩 CAPTCHA detected — solving via 2captcha…','t-accent');
+      try {
+        // Get site key
+        const siteKey = await page.evaluate(()=>{
+          const el = document.querySelector('[data-sitekey]');
+          return el?.getAttribute('data-sitekey')||'';
+        });
+        const pageUrl = page.url();
+
+        if(siteKey){
+          // Submit to 2captcha
+          const submitR = await fetch('https://2captcha.com/in.php',{
+            method:'POST',
+            headers:{'Content-Type':'application/x-www-form-urlencoded'},
+            body:\`key=\${captchaKey}&method=userrecaptcha&googlekey=\${siteKey}&pageurl=\${encodeURIComponent(pageUrl)}&json=1\`
+          });
+          const submitData = await submitR.json();
+          if(submitData.status===1){
+            const captchaId = submitData.request;
+            L(\`    ⏳ 2captcha task ID: \${captchaId} — waiting for solution…\`,'tm');
+            // Poll for result (max 120s)
+            let solution = null;
+            for(let attempt=0;attempt<24;attempt++){
+              await new Promise(r=>setTimeout(r,5000));
+              const resR = await fetch(\`https://2captcha.com/res.php?key=\${captchaKey}&action=get&id=\${captchaId}&json=1\`);
+              const resData = await resR.json();
+              if(resData.status===1){ solution=resData.request; break; }
+              if(resData.request==='ERROR_CAPTCHA_UNSOLVABLE') break;
+            }
+            if(solution){
+              // Inject solution into g-recaptcha-response
+              await page.evaluate(token=>{
+                try {
+                  document.getElementById('g-recaptcha-response').style.display='block';
+                  document.getElementById('g-recaptcha-response').value=token;
+                } catch(e){}
+                try {
+                  const cb = window.___grecaptcha_cfg?.clients?.[0]?.callback;
+                  if(typeof cb==='function') cb(token);
+                } catch(e){}
+                try { window.captchaCallback?.(token); } catch(e){}
+              }, solution);
+              result.captchaSolved=true;
+              L('    ✅ CAPTCHA solved and injected!','t-accent');
+            } else {
+              L('    ⚠ CAPTCHA solution timed out','t-warn');
+            }
+          } else {
+            L(\`    ⚠ 2captcha submit failed: \${JSON.stringify(submitData)}\`,'t-warn');
+          }
+        } else {
+          L('    ⚠ Could not extract sitekey — manual solve needed','t-warn');
+        }
+      } catch(e){
+        L(\`    ❌ CAPTCHA solve error: \${e.message}\`,'t-err');
+      }
+    } else if(hasCaptcha && !captchaKey){
+      L('  ⚠ CAPTCHA detected but no 2captcha key — registration may fail','t-warn');
+    }
+
+    await page.waitForTimeout(500);
+
+    // ── Click submit ─────────────────────────────────────────────────────────
+    L('  🖱 Looking for submit button…','tm');
+    const submitSelectors = [
+      'button[type="submit"]',
+      'input[type="submit"]',
+      'button:text-matches("sign up","i")',
+      'button:text-matches("register","i")',
+      'button:text-matches("create account","i")',
+      'button:text-matches("join","i")',
+      'button:text-matches("get started","i")',
+      'button:text-matches("next","i")',
+      'button:text-matches("continue","i")',
+      '[data-testid*="submit"]',
+      '[data-testid*="signup"]',
+      'form button:last-of-type',
+      '.submit-btn','#submit-btn','#registerBtn','#signupBtn',
+    ];
+
+    let submitted = false;
+    for(const sel of submitSelectors){
+      try {
+        const btn = await page.$(sel);
+        if(btn && await btn.isVisible()){
+          L(\`    → Clicking: \${sel}\`,'tm');
+          await btn.click();
+          submitted=true; break;
+        }
+      } catch(e){}
+    }
+
+    if(!submitted){
+      // Fallback: submit the form
+      const submitted2 = await page.evaluate(()=>{
+        const form = document.querySelector('form');
+        if(form){ form.submit(); return true; }
+        return false;
+      });
+      if(submitted2){ submitted=true; L('    → Form.submit() called as fallback','tm'); }
+    }
+
+    if(!submitted){ L('  ⚠ Could not find submit button','t-warn'); result.submitStatus='no-submit-found'; }
+    else { L('  ✔ Submit clicked','t-info'); result.submitStatus='submitted'; }
+
+    // ── Wait for success signal ───────────────────────────────────────────────
+    await page.waitForTimeout(3000);
+    await page.waitForLoadState('networkidle',{timeout:10000}).catch(()=>{});
+
+    const afterUrl = page.url();
+    const afterBody = await page.evaluate(()=>document.body?.innerText?.toLowerCase().slice(0,1000)||'');
+    L(\`  → Post-submit URL: \${afterUrl}\`,'tm');
+
+    const successSignals = ['thank','success','verify','check your email','welcome','confirm','account created','registered','almost done','one more step','sent you','activation'];
+    const errorSignals   = ['error','invalid','already taken','already exists','already registered','username taken','email already','try again','failed'];
+
+    const isSuccess = successSignals.some(s=>afterBody.includes(s)) || afterUrl!==url;
+    const isError   = !isSuccess && errorSignals.some(s=>afterBody.includes(s));
+
+    if(isSuccess){
+      result.ok=true; result.note='Registration accepted — '+afterUrl.slice(0,80);
+      result.verifyStatus='submitted-success';
+      result.profileUrl=afterUrl;
+      L(\`  ✅ SUCCESS: \${result.note}\`,'t-accent');
+    } else if(isError){
+      result.ok=false; result.note='Form error detected on page';
+      L(\`  ❌ Error signals detected on page\`,'t-err');
+    } else {
+      // Ambiguous — mark as likely success if we submitted
+      result.ok=submitted; result.note=submitted?'Submitted — outcome unclear (no explicit success msg)':'Could not submit form';
+      L(\`  ⚠ Ambiguous outcome — assuming \${submitted?'success':'failure'}\`,'t-warn');
+    }
+
+    // Extract profile URL if visible
+    if(!result.profileUrl){
+      try {
+        const pUrl = await page.evaluate(()=>{
+          const links = [...document.querySelectorAll('a[href*="/profile"],a[href*="/user"],a[href*="/u/"],a[href*="/member"],a[href*="/@"]')];
+          return links[0]?.href||'';
+        });
+        if(pUrl) result.profileUrl=pUrl;
+      } catch(e){}
+    }
+
+  } catch(err){
+    result.ok=false; result.note='Playwright error: '+err.message;
+    L(\`❌ Fatal: \${err.message}\`,'t-err');
+  } finally {
+    try { await browser?.close(); } catch(e){}
+  }
+
+  return res.status(200).json(result);
+}
+`;
+
+const UAC_CLICK_LINK_CODE = `// /api/click-link.js — Deploy to Vercel
+// Clicks a verification link using a real browser (bypasses anti-bot)
+import { chromium } from 'playwright-core';
+import * as chromiumExec from '@sparticuz/chromium';
+
+export default async function handler(req, res) {
+  if(req.method!=='POST') return res.status(405).json({error:'Method Not Allowed'});
+  const { url } = req.body||{};
+  if(!url) return res.status(400).json({error:'url required'});
+  let browser;
+  try {
+    browser = await chromium.launch({
+      executablePath: await chromiumExec.executablePath(),
+      args: [...chromiumExec.args,'--no-sandbox'],
+      headless: chromiumExec.headless,
+    });
+    const page = await browser.newPage();
+    await page.goto(url, {waitUntil:'networkidle', timeout:30000});
+    await page.waitForTimeout(2000);
+    return res.status(200).json({ok:true, finalUrl: page.url()});
+  } catch(e){
+    return res.status(200).json({ok:false, error: e.message});
+  } finally {
+    try { await browser?.close(); } catch(e){}
+  }
+}
+`;
+
 function renderAccountCreator(el){
   el = el || document.getElementById('page-account_creator');
   if(!el) return;
   const chips = AC_PLATFORMS.map(p=>`<div class="chip ac-platform-chip on" data-pid="${p.id}" onclick="this.classList.toggle('on')" title="${p.notes}">
     ${p.icon} ${p.name} <span class="mono" style="font-size:8px;color:var(--muted)">DA${p.da}</span>
   </div>`).join('');
+  // ─── Tab state ────────────────────────────────────────────────
+  const activeTab = window._acTab || 'universal';
+
   el.innerHTML = `
-  <div class="page-title">🤖 Account Creator <span class="badge badge-g" style="font-size:9px;margin-left:8px">LIVE ENGINE</span></div>
-  <div class="page-sub">// Real registrations · mail.tm auto-inbox · email verification · API token capture · ${AC_PLATFORMS.length} platforms</div>
+  <div class="page-title">🤖 Account Creator <span class="badge badge-g" style="font-size:9px;margin-left:8px">GOD TIER v3</span> <span class="badge badge-b" style="font-size:9px;margin-left:4px">PLAYWRIGHT ENGINE</span></div>
+  <div class="page-sub">// Universal · Any website · Real Playwright browser · mail.tm inbox · 2captcha solve · auto-verify · ${AC_PLATFORMS.length} preset platforms</div>
   ${moduleBar('ac_defaultPassword','help-account-creator')}
-  <div class="notice notice-success">
-    <strong>🚀 Live Registration Engine:</strong> Creates real accounts via each platform API. Uses mail.tm disposable inboxes, polls for verification emails, auto-clicks confirm links, and captures API tokens returned on signup.
+
+  <!-- ── TAB SWITCHER ── -->
+  <div style="display:flex;gap:0;margin-bottom:14px;border-bottom:2px solid var(--win-border)">
+    <button id="ac-tab-universal" onclick="window._acTab='universal';renderAccountCreator()" style="padding:7px 18px;font-size:11px;font-weight:700;font-family:Tahoma,sans-serif;cursor:pointer;background:${activeTab==='universal'?'var(--win-surface)':'var(--win-dark)'};border:2px solid var(--win-border);border-bottom:${activeTab==='universal'?'2px solid var(--win-surface)':'none'};margin-bottom:-2px;color:${activeTab==='universal'?'var(--win-blue2)':'var(--win-text-muted)'}">🌐 Universal Creator <span class="badge badge-g" style="font-size:8px">NEW</span></button>
+    <button id="ac-tab-platforms" onclick="window._acTab='platforms';renderAccountCreator()" style="padding:7px 18px;font-size:11px;font-weight:700;font-family:Tahoma,sans-serif;cursor:pointer;background:${activeTab==='platforms'?'var(--win-surface)':'var(--win-dark)'};border:2px solid var(--win-border);border-bottom:${activeTab==='platforms'?'2px solid var(--win-surface)':'none'};margin-bottom:-2px;color:${activeTab==='platforms'?'var(--win-blue2)':'var(--win-text-muted)'}">🏗 Preset Platforms</button>
+    <button id="ac-tab-backend" onclick="window._acTab='backend';renderAccountCreator()" style="padding:7px 18px;font-size:11px;font-weight:700;font-family:Tahoma,sans-serif;cursor:pointer;background:${activeTab==='backend'?'var(--win-surface)':'var(--win-dark)'};border:2px solid var(--win-border);border-bottom:${activeTab==='backend'?'2px solid var(--win-surface)':'none'};margin-bottom:-2px;color:${activeTab==='backend'?'var(--win-blue2)':'var(--win-text-muted)'}">🔧 Backend Setup</button>
   </div>
-  <div class="notice notice-warn" style="margin-top:-6px">
-    <strong>⚠ Responsibility:</strong> Automated registration may violate platform ToS. Use rotating proxies to avoid IP blocks.
-  </div>
-  <div class="grid2" style="gap:18px">
-    <div>
-      <div class="card">
-        <div class="card-title">⚙ Registration Configuration</div>
-        <div class="grid2">
-          <div class="fg"><label class="lbl">Base Username</label>
-            <input type="text" id="ac-username" placeholder="seouser" /></div>
-          <div class="fg"><label class="lbl">Accounts per Platform <span class="xs tm">(max 20)</span></label>
-            <input type="number" id="ac-count" value="1" min="1" max="20" /></div>
+
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <!-- TAB: UNIVERSAL CREATOR                                      -->
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <div id="ac-pane-universal" style="display:${activeTab==='universal'?'block':'none'}">
+    <div class="notice notice-success" style="margin-bottom:10px">
+      <strong>⚡ God-Tier Universal Engine:</strong> Paste ANY website URL(s). Playwright opens a real Chromium browser, finds the signup page automatically, detects every form field (email, username, password, name, phone, bio, DOB, country…), fills them with smart profile data, solves reCAPTCHA/hCaptcha via 2captcha, clicks Submit, waits for success — then polls mail.tm inbox and auto-clicks the verification link.
+    </div>
+    <div class="notice notice-warn" style="margin-top:-6px;margin-bottom:14px">
+      <strong>⚠ Requires:</strong> Vercel backend deployed with <code>/api/universal-register</code> + <code>/api/click-link</code> endpoints. See the <strong>Backend Setup</strong> tab for copy-paste code.
+    </div>
+
+    <div class="grid2" style="gap:14px">
+      <!-- LEFT COLUMN: Config -->
+      <div>
+        <div class="card">
+          <div class="card-title">🎯 Target URLs — Paste One Per Line</div>
+          <textarea id="uac-urls" style="width:100%;height:130px;font-family:var(--mono);font-size:11px;padding:8px;background:var(--term-bg);color:var(--term-text);border:1px solid var(--win-border);resize:vertical" placeholder="https://example.com/signup&#10;https://forum.site.com/register&#10;https://anycommunity.net/join&#10;https://newsite.io/create-account&#10;&#10;(Any site — tool finds the reg page automatically)"></textarea>
+          <div style="font-size:9px;color:var(--muted2);font-family:var(--mono);margin-top:4px">💡 You can paste the homepage URL — tool will navigate to the signup page automatically</div>
         </div>
-        <div class="fg"><label class="lbl">Fallback Email Domain <span class="xs tm">(mail.tm used by default when checked below)</span></label>
-          <input type="text" id="ac-email-domain" placeholder="yourdomain.com" /></div>
-        <div class="fg"><label class="lbl">CAPTCHA Solver API Key <span class="xs tm">(2captcha / anticaptcha / capsolver)</span></label>
-          <input type="password" id="ac-captcha-key" placeholder="Boosts success rate on reCAPTCHA-protected platforms" /></div>
-        <div class="fg"><label class="lbl">Proxy <span class="xs tm">(optional)</span></label>
-          <input type="text" id="ac-proxy" placeholder="http://user:pass@host:port" /></div>
-        <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px">
-          <div style="display:flex;align-items:center;gap:10px;padding:10px;background:rgba(0,200,100,0.06);border:1px solid rgba(0,200,100,0.2)">
-            <input type="checkbox" id="ac-use-mailtm" style="width:auto" checked />
-            <label for="ac-use-mailtm" class="mono xs" style="cursor:pointer;color:var(--accent)">📧 Use mail.tm real disposable inboxes (enables email verification)</label></div>
-          <div style="display:flex;align-items:center;gap:10px;padding:10px;background:rgba(0,200,100,0.06);border:1px solid rgba(0,200,100,0.2)">
-            <input type="checkbox" id="ac-auto-verify" style="width:auto" checked />
-            <label for="ac-auto-verify" class="mono xs" style="cursor:pointer;color:var(--accent)">✅ Auto-verify email — poll inbox, find link, click to activate</label></div>
-        </div>
-        <div class="fg"><label class="lbl">Target Platforms <span class="xs tm">(hover for notes)</span></label>
-          <div style="margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap">
-            <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.ac-platform-chip').forEach(c=>c.classList.add('on'))">All</button>
-            <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.ac-platform-chip').forEach(c=>c.classList.remove('on'))">None</button>
-            <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.ac-platform-chip').forEach(c=>{const plat=AC_PLATFORMS.find(p=>p.id===c.dataset.pid);c.classList.toggle('on',(plat?.da||0)>=85)})">DA85+</button>
-            <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.ac-platform-chip').forEach(c=>{const plat=AC_PLATFORMS.find(p=>p.id===c.dataset.pid);c.classList.toggle('on',(plat?.da||0)>=90)})">DA90+</button>
+
+        <div class="card">
+          <div class="card-title">⚙ Profile & Registration Config</div>
+          <div class="grid2">
+            <div class="fg"><label class="lbl">Base Username <span class="xs tm">(randomized per account)</span></label>
+              <input type="text" id="uac-username" placeholder="seouser" value="seouser" /></div>
+            <div class="fg"><label class="lbl">Accounts per Site <span class="xs tm">(max 10)</span></label>
+              <input type="number" id="uac-count" value="1" min="1" max="10" /></div>
           </div>
-          <div class="chips">${chips}</div></div>
-        <div class="row mt8" style="gap:8px;flex-wrap:wrap">
-          <button id="ac-run-btn" class="btn btn-primary" style="flex:1" onclick="acRunCreation()">🚀 Live Register</button>
-          <button id="ac-stop-btn" class="btn btn-danger" disabled onclick="AC_STATE.stopFlag=true;acLog('⛔ Stop requested…','t-warn')">⛔ Stop</button>
-          <button class="btn btn-ghost" onclick="acExportCSV()">📥 CSV</button>
-          <button class="btn btn-danger btn-sm" onclick="if(confirm('Clear all accounts?')){AC_STATE.jobs=[];acRenderTable();}">Clear</button>
+          <div class="grid2">
+            <div class="fg"><label class="lbl">Custom Password <span class="xs tm">(blank = auto-generate)</span></label>
+              <input type="password" id="uac-custom-pw" placeholder="Leave blank to auto-generate" /></div>
+            <div class="fg"><label class="lbl">Custom Email <span class="xs tm">(blank = mail.tm auto)</span></label>
+              <input type="text" id="uac-custom-email" placeholder="Leave blank for mail.tm" /></div>
+          </div>
+          <div class="fg"><label class="lbl">2Captcha API Key <span class="xs tm">(required for CAPTCHA-protected sites)</span></label>
+            <input type="password" id="uac-captcha-key" placeholder="Your 2captcha.com API key" /></div>
+          <div class="fg"><label class="lbl">Proxy <span class="xs tm">(optional — http://user:pass@host:port)</span></label>
+            <input type="text" id="uac-proxy" placeholder="http://user:pass@proxyhost:port" /></div>
+          <div style="display:flex;flex-direction:column;gap:6px;margin:10px 0">
+            <div style="display:flex;align-items:center;gap:10px;padding:8px;background:rgba(0,200,100,0.06);border:1px solid rgba(0,200,100,0.2)">
+              <input type="checkbox" id="uac-use-mailtm" style="width:auto" checked />
+              <label for="uac-use-mailtm" class="mono xs" style="cursor:pointer;color:var(--accent)">📧 Auto-create mail.tm disposable inbox per account</label></div>
+            <div style="display:flex;align-items:center;gap:10px;padding:8px;background:rgba(0,200,100,0.06);border:1px solid rgba(0,200,100,0.2)">
+              <input type="checkbox" id="uac-auto-verify" style="width:auto" checked />
+              <label for="uac-auto-verify" class="mono xs" style="cursor:pointer;color:var(--accent)">✅ Auto-verify email — poll inbox 90s, click activation link</label></div>
+            <div style="display:flex;align-items:center;gap:10px;padding:8px;background:rgba(0,87,255,0.05);border:1px solid rgba(0,87,255,0.15)">
+              <input type="checkbox" id="uac-headless" style="width:auto" checked />
+              <label for="uac-headless" class="mono xs" style="cursor:pointer;color:var(--accent)">👻 Headless mode (uncheck to see browser — for debugging)</label></div>
+          </div>
+          <div class="row" style="gap:8px;flex-wrap:wrap;margin-top:10px">
+            <button id="uac-run-btn" class="btn btn-primary" style="flex:1;font-size:12px;padding:8px" onclick="uacRunCreation()">🚀 LAUNCH UNIVERSAL CREATOR</button>
+            <button id="uac-stop-btn" class="btn btn-danger" disabled onclick="UAC_STATE.stopFlag=true;uacLog('⛔ Stop requested…','t-warn')">⛔ Stop</button>
+            <button class="btn btn-ghost" onclick="uacExportCSV()">📥 CSV</button>
+            <button class="btn btn-danger btn-sm" onclick="if(confirm('Clear?')){UAC_STATE.jobs=[];uacRenderTable();}">Clear</button>
+          </div>
+        </div>
+
+        <!-- Field Intelligence Map -->
+        <div class="card">
+          <div class="card-title">🧠 Smart Field Detection — What Gets Filled</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px">
+            ${[
+              ['📧 Email','email, e-mail, mail, user_email…'],
+              ['👤 Username','username, user, login, handle, nick…'],
+              ['🔑 Password','password, passwd, pass, pwd…'],
+              ['🔑 Confirm PW','confirm_password, password2, retype…'],
+              ['🧑 First Name','first_name, fname, given_name…'],
+              ['👨 Last Name','last_name, lname, surname…'],
+              ['📛 Full Name','name, full_name, display_name…'],
+              ['📱 Phone','phone, mobile, telephone, tel…'],
+              ['🌐 Website','website, url, homepage, blog…'],
+              ['📝 Bio','bio, about, description, intro…'],
+              ['🏙 City','city, town, locality'],
+              ['🌍 Country','country, nation, country_code'],
+              ['📮 Zip','zip, postal_code, postcode…'],
+              ['🎂 Birth Year','birth_year, dob_year, year…'],
+              ['📅 Birth Month','birth_month, dob_month…'],
+              ['☑ Checkboxes','Terms, newsletter, age confirm…'],
+              ['📋 Selects','Gender, country dropdowns…'],
+              ['🔘 Radios','Auto-selects first option'],
+            ].map(([label,hint])=>`<div style="padding:3px 0;border-bottom:1px dotted var(--border)">
+              <span class="mono xs" style="font-weight:700">${label}</span>
+              <div style="font-size:9px;color:var(--muted2);font-family:var(--mono)">${hint}</div>
+            </div>`).join('')}
+          </div>
         </div>
       </div>
-      <div class="card">
-        <div class="card-title">🗺 Platform Overview</div>
-        <div style="max-height:280px;overflow-y:auto">
-        ${AC_PLATFORMS.map(p=>`<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border)">
-          <span style="font-size:15px">${p.icon}</span>
-          <div style="flex:1"><div class="mono xs" style="font-weight:700">${p.name}</div>
-          <div style="font-size:9px;color:var(--muted2);font-family:var(--mono)">${p.notes}</div></div>
-          <span class="badge ${p.da>=90?'badge-g':p.da>=80?'badge-b':'badge-y'}">DA${p.da}</span>
-        </div>`).join('')}
+
+      <!-- RIGHT COLUMN: Terminal + Results -->
+      <div>
+        <div class="card">
+          <div class="card-title">🖥 Universal Creator Log — Live Output</div>
+          <div class="terminal" id="uac-terminal" style="height:320px">
+            <div class="tline"><span class="ttime">--:--:--</span><span class="t-accent">⚡ GOD TIER ENGINE READY — Paste URLs on the left and click LAUNCH</span></div>
+            <div class="tline"><span class="ttime">--:--:--</span><span class="tm">   Step 1: mail.tm inbox created</span></div>
+            <div class="tline"><span class="ttime">--:--:--</span><span class="tm">   Step 2: Playwright opens real Chromium browser</span></div>
+            <div class="tline"><span class="ttime">--:--:--</span><span class="tm">   Step 3: Navigates to site, finds signup page</span></div>
+            <div class="tline"><span class="ttime">--:--:--</span><span class="tm">   Step 4: Detects all form fields by name/id/placeholder/label</span></div>
+            <div class="tline"><span class="ttime">--:--:--</span><span class="tm">   Step 5: Fills fields with smart profile (email, username, DOB, etc.)</span></div>
+            <div class="tline"><span class="ttime">--:--:--</span><span class="tm">   Step 6: Solves CAPTCHA via 2captcha if detected</span></div>
+            <div class="tline"><span class="ttime">--:--:--</span><span class="tm">   Step 7: Clicks Submit, waits for success signal</span></div>
+            <div class="tline"><span class="ttime">--:--:--</span><span class="tm">   Step 8: Polls mail.tm inbox, finds verify link, clicks it</span></div>
+            <div class="tline"><span class="ttime">--:--:--</span><span class="t-accent">   ✅ Account LIVE + VERIFIED</span></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">📋 Registered Accounts — Universal</div>
+          <div class="tw" style="max-height:480px;overflow-y:auto"><table>
+            <thead><tr><th>Time</th><th>Site</th><th>Username</th><th>Email</th><th>Password</th><th>Fields</th><th>CAPTCHA</th><th>Status</th><th>Note</th><th>Links</th></tr></thead>
+            <tbody id="uac-tbody"><tr><td colspan="10" style="text-align:center;padding:28px;color:var(--muted2);font-family:var(--mono);font-size:11px">No accounts yet — paste URLs and click Launch</td></tr></tbody>
+          </table></div>
         </div>
       </div>
     </div>
-    <div>
-      <div class="card">
-        <div class="card-title">🖥 Live Registration Log</div>
-        <div class="terminal" id="ac-terminal" style="height:260px">
-          <div class="tline"><span class="ttime">--:--:--</span><span class="t-accent">🚀 Live Registration Engine ready. Configure and click Live Register.</span></div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <!-- TAB: PRESET PLATFORMS                                       -->
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <div id="ac-pane-platforms" style="display:${activeTab==='platforms'?'block':'none'}">
+    <div class="notice notice-info" style="margin-bottom:10px">
+      <strong>ℹ Preset Platform Engine:</strong> Pre-configured registrations for ${AC_PLATFORMS.length} high-DA platforms (Reddit, Medium, WordPress, etc.) routed through your Vercel <code>/api/register</code> endpoint.
+    </div>
+    <div class="grid2" style="gap:18px">
+      <div>
+        <div class="card">
+          <div class="card-title">⚙ Registration Configuration</div>
+          <div class="grid2">
+            <div class="fg"><label class="lbl">Base Username</label>
+              <input type="text" id="ac-username" placeholder="seouser" value="seouser" /></div>
+            <div class="fg"><label class="lbl">Accounts per Platform <span class="xs tm">(max 20)</span></label>
+              <input type="number" id="ac-count" value="1" min="1" max="20" /></div>
+          </div>
+          <div class="fg"><label class="lbl">CAPTCHA Solver API Key <span class="xs tm">(2captcha / anticaptcha)</span></label>
+            <input type="password" id="ac-captcha-key" placeholder="Boosts success rate on reCAPTCHA-protected platforms" /></div>
+          <div class="fg"><label class="lbl">Proxy <span class="xs tm">(optional)</span></label>
+            <input type="text" id="ac-proxy" placeholder="http://user:pass@host:port" /></div>
+          <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px">
+            <div style="display:flex;align-items:center;gap:10px;padding:10px;background:rgba(0,200,100,0.06);border:1px solid rgba(0,200,100,0.2)">
+              <input type="checkbox" id="ac-use-mailtm" style="width:auto" checked />
+              <label for="ac-use-mailtm" class="mono xs" style="cursor:pointer;color:var(--accent)">📧 Use mail.tm real disposable inboxes</label></div>
+            <div style="display:flex;align-items:center;gap:10px;padding:10px;background:rgba(0,200,100,0.06);border:1px solid rgba(0,200,100,0.2)">
+              <input type="checkbox" id="ac-auto-verify" style="width:auto" checked />
+              <label for="ac-auto-verify" class="mono xs" style="cursor:pointer;color:var(--accent)">✅ Auto-verify email</label></div>
+          </div>
+          <div class="fg"><label class="lbl">Target Platforms</label>
+            <div style="margin-bottom:8px;display:flex;gap:6px;flex-wrap:wrap">
+              <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.ac-platform-chip').forEach(c=>c.classList.add('on'))">All</button>
+              <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.ac-platform-chip').forEach(c=>c.classList.remove('on'))">None</button>
+              <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.ac-platform-chip').forEach(c=>{const plat=AC_PLATFORMS.find(p=>p.id===c.dataset.pid);c.classList.toggle('on',(plat?.da||0)>=85)})">DA85+</button>
+              <button class="btn btn-ghost btn-xs" onclick="document.querySelectorAll('.ac-platform-chip').forEach(c=>{const plat=AC_PLATFORMS.find(p=>p.id===c.dataset.pid);c.classList.toggle('on',(plat?.da||0)>=90)})">DA90+</button>
+            </div>
+            <div class="chips">${chips}</div></div>
+          <div class="row mt8" style="gap:8px;flex-wrap:wrap">
+            <button id="ac-run-btn" class="btn btn-primary" style="flex:1" onclick="acRunCreation()">🚀 Live Register</button>
+            <button id="ac-stop-btn" class="btn btn-danger" disabled onclick="AC_STATE.stopFlag=true;acLog('⛔ Stop requested…','t-warn')">⛔ Stop</button>
+            <button class="btn btn-ghost" onclick="acExportCSV()">📥 CSV</button>
+            <button class="btn btn-danger btn-sm" onclick="if(confirm('Clear all accounts?')){AC_STATE.jobs=[];acRenderTable();}">Clear</button>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title">🗺 Platform Overview</div>
+          <div style="max-height:280px;overflow-y:auto">
+          ${AC_PLATFORMS.map(p=>`<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border)">
+            <span style="font-size:15px">${p.icon}</span>
+            <div style="flex:1"><div class="mono xs" style="font-weight:700">${p.name}</div>
+            <div style="font-size:9px;color:var(--muted2);font-family:var(--mono)">${p.notes}</div></div>
+            <span class="badge ${p.da>=90?'badge-g':p.da>=80?'badge-b':'badge-y'}">DA${p.da}</span>
+          </div>`).join('')}
+          </div>
         </div>
       </div>
-      <div class="card">
-        <div class="card-title">📋 Registered Accounts</div>
-        <div class="tw" style="max-height:500px;overflow-y:auto"><table>
-          <thead><tr><th>Time</th><th>Platform</th><th>Username</th><th>Email</th><th>Password</th><th>API Token</th><th>Status</th><th>Note</th><th>Links</th></tr></thead>
-          <tbody id="ac-tbody"><tr><td colspan="9" style="text-align:center;padding:28px;color:var(--muted2);font-family:var(--mono);font-size:11px">No accounts yet — click Live Register above.</td></tr></tbody>
-        </table></div>
+      <div>
+        <div class="card">
+          <div class="card-title">🖥 Live Registration Log</div>
+          <div class="terminal" id="ac-terminal" style="height:260px">
+            <div class="tline"><span class="ttime">--:--:--</span><span class="t-accent">🚀 Preset Platform Engine ready. Configure and click Live Register.</span></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title">📋 Registered Accounts</div>
+          <div class="tw" style="max-height:500px;overflow-y:auto"><table>
+            <thead><tr><th>Time</th><th>Platform</th><th>Username</th><th>Email</th><th>Password</th><th>API Token</th><th>Status</th><th>Note</th><th>Links</th></tr></thead>
+            <tbody id="ac-tbody"><tr><td colspan="9" style="text-align:center;padding:28px;color:var(--muted2);font-family:var(--mono);font-size:11px">No accounts yet — click Live Register above.</td></tr></tbody>
+          </table></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <!-- TAB: BACKEND SETUP                                          -->
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <div id="ac-pane-backend" style="display:${activeTab==='backend'?'block':'none'}">
+    <div class="notice notice-warn" style="margin-bottom:12px">
+      <strong>🔧 One-time Vercel setup required for Universal Creator.</strong> Deploy these 2 files to your Vercel project. It uses <code>@sparticuz/chromium</code> + <code>playwright-core</code> for serverless Playwright.
+    </div>
+    <div class="card" style="margin-bottom:12px">
+      <div class="card-title">📦 package.json additions — run in your Vercel project root</div>
+      <div class="terminal" style="height:auto;padding:10px">
+        <div class="tline"><span class="t-accent">npm install playwright-core @sparticuz/chromium node-fetch</span></div>
+        <div class="tline"><span class="tm"># Also add to vercel.json: { "functions": { "api/*.js": { "memory": 1024, "maxDuration": 300 } } }</span></div>
+      </div>
+    </div>
+    <div class="card" style="margin-bottom:12px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <div class="card-title" style="margin:0">📄 /api/universal-register.js</div>
+        <button class="btn btn-ghost btn-xs" onclick="navigator.clipboard?.writeText(UAC_BACKEND_CODE);toast('Copied to clipboard!','s')">📋 Copy</button>
+      </div>
+      <pre style="font-family:var(--mono);font-size:9px;line-height:1.5;color:var(--term-text);background:var(--term-bg);padding:12px;overflow:auto;max-height:400px;white-space:pre-wrap;border:1px solid var(--win-border)">${esc(UAC_BACKEND_CODE)}</pre>
+    </div>
+    <div class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <div class="card-title" style="margin:0">📄 /api/click-link.js</div>
+        <button class="btn btn-ghost btn-xs" onclick="navigator.clipboard?.writeText(UAC_CLICK_LINK_CODE);toast('Copied to clipboard!','s')">📋 Copy</button>
+      </div>
+      <pre style="font-family:var(--mono);font-size:9px;line-height:1.5;color:var(--term-text);background:var(--term-bg);padding:12px;overflow:auto;max-height:200px;white-space:pre-wrap;border:1px solid var(--win-border)">${esc(UAC_CLICK_LINK_CODE)}</pre>
+    </div>
+    <div class="card">
+      <div class="card-title">📋 Deploy Checklist</div>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        ${[
+          ['1','Create files','Add <code>/api/universal-register.js</code> and <code>/api/click-link.js</code> to your Vercel project'],
+          ['2','Install deps','Run <code>npm install playwright-core @sparticuz/chromium</code> in project root'],
+          ['3','vercel.json','Set memory to 1024MB and maxDuration to 300s for both API functions'],
+          ['4','Deploy','Run <code>vercel deploy --prod</code> or push to GitHub for auto-deploy'],
+          ['5','Set URL','In ⚙ Settings → Vercel Backend URL, enter your deployed URL'],
+          ['6','2captcha','Fund your 2captcha account and add the API key in Universal Creator config'],
+          ['7','Test','Paste <code>https://dev.to/enter?state=new-user</code> and click Launch'],
+        ].map(([n,title,desc])=>`<div style="display:flex;align-items:flex-start;gap:10px;padding:8px;background:rgba(0,87,255,0.04);border:1px solid rgba(0,87,255,0.12)">
+          <span style="background:var(--win-blue2);color:#fff;padding:2px 7px;font-size:10px;font-weight:700;font-family:var(--mono);flex-shrink:0">${n}</span>
+          <div><div style="font-weight:700;font-size:11px">${title}</div><div style="font-size:10px;color:var(--muted2)">${desc}</div></div>
+        </div>`).join('')}
       </div>
     </div>
   </div>`;
-  acRenderTable();
-}
 
+  acRenderTable();
+  uacRenderTable();
+}
 // ═══════════════════════════════════════════════════════════════
 // SERP SCRAPER
 // ═══════════════════════════════════════════════════════════════
