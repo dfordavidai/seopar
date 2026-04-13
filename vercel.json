@@ -2,7 +2,10 @@
   "version": 2,
   "name": "seo-parasite-pro",
   "functions": {
-    "api/**/*.js": { "maxDuration": 30 }
+    "api/register.js":            { "maxDuration": 120 },
+    "api/universal-register.js":  { "maxDuration": 120 },
+    "api/click-link.js":          { "maxDuration": 60  },
+    "api/**/*.js":                { "maxDuration": 30  }
   },
   "routes": [
     { "src": "/api/(.*)", "dest": "/api/$1" },
