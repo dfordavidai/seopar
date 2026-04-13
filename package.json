@@ -1,0 +1,10 @@
+{
+  "name": "seo-parasite-pro-backend",
+  "version": "1.0.0",
+  "description": "Vercel backend for SEO Parasite Pro v17 — CORS proxy, captcha, ping, indexing",
+  "private": true,
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "node-fetch": "^3.3.2"
+  }
+}

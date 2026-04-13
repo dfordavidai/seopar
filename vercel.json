@@ -1,0 +1,22 @@
+{
+  "version": 2,
+  "name": "seo-parasite-pro",
+  "functions": {
+    "api/**/*.js": { "maxDuration": 30 }
+  },
+  "routes": [
+    { "src": "/api/(.*)", "dest": "/api/$1" },
+    { "src": "/",         "dest": "/index.html" },
+    { "src": "/(.*)",     "dest": "/api/health" }
+  ],
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        { "key": "Access-Control-Allow-Origin",  "value": "*" },
+        { "key": "Access-Control-Allow-Methods", "value": "GET,POST,OPTIONS" },
+        { "key": "Access-Control-Allow-Headers", "value": "Content-Type,X-API-Key,Authorization" }
+      ]
+    }
+  ]
+}
